@@ -29,6 +29,8 @@ wonderblob-core = { path = "../crates/wonderblob-core" }
 uuid = { version = "1", features = ["v4", "serde"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 tauri-plugin-clipboard-manager = "2.3.2"
+notify = "8"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

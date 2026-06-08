@@ -1,5 +1,6 @@
 mod bookmarks;
 mod commands;
+mod edit;
 #[cfg(test)]
 mod fake_backend;
 mod state;
