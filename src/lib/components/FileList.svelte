@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { api, type Entry } from "../api";
   import { describeError, errorDetail } from "../errors";
   import { formatMtime, formatSize } from "../format";
@@ -136,18 +137,72 @@
     return [...arr].sort(cmp);
   }
 
+  // Tree view: directories expand inline, lazily loading their children. The
+  // flat `entries` is the top level; `childrenMap` holds each expanded dir's
+  // listing. `visibleRows` flattens that tree to the rows actually shown, so the
+  // index-based selection/keyboard logic keeps working over a single array.
+  const expanded = new SvelteSet<string>();
+  const childrenMap = new SvelteMap<string, Entry[]>();
+  const loadingChildren = new SvelteSet<string>();
+
+  const visibleRows = $derived.by(() => {
+    const out: { entry: Entry; depth: number }[] = [];
+    const walk = (list: Entry[], depth: number) => {
+      for (const e of list) {
+        out.push({ entry: e, depth });
+        if (e.kind === "dir" && expanded.has(e.path)) {
+          const kids = childrenMap.get(e.path);
+          if (kids) walk(kids, depth + 1);
+        }
+      }
+    };
+    walk(entries, 0);
+    return out;
+  });
+
+  function reanchor(path: string | null) {
+    if (!path) return;
+    const idx = visibleRows.findIndex((r) => r.entry.path === path);
+    if (idx >= 0) selectedIndex = idx;
+  }
+
+  async function toggleExpand(entry: Entry) {
+    if (entry.kind !== "dir") return;
+    const path = entry.path;
+    const keep = selected()?.path ?? null;
+    if (expanded.has(path)) {
+      expanded.delete(path);
+      reanchor(keep);
+      return;
+    }
+    expanded.add(path);
+    if (!childrenMap.has(path)) {
+      const conn = $activeConnection;
+      if (conn) {
+        loadingChildren.add(path);
+        try {
+          childrenMap.set(path, sortEntries(await api.listDir(conn.id, path)));
+        } catch (e) {
+          expanded.delete(path);
+          onerror?.(describeError(e, "list"));
+        } finally {
+          loadingChildren.delete(path);
+        }
+      }
+    }
+    reanchor(keep);
+  }
+
   function setSort(col: "name" | "size" | "mtime") {
-    const prevPath = selected()?.path ?? null;
+    const keep = selected()?.path ?? null;
     if (sortCol === col) sortDir = sortDir === 1 ? -1 : 1;
     else {
       sortCol = col;
       sortDir = 1;
     }
     entries = sortEntries(entries);
-    if (prevPath) {
-      const idx = entries.findIndex((e) => e.path === prevPath);
-      if (idx >= 0) selectedIndex = idx;
-    }
+    for (const [k, v] of childrenMap) childrenMap.set(k, sortEntries(v));
+    reanchor(keep);
   }
 
   $effect(() => {
@@ -190,6 +245,10 @@
     try {
       const result = await api.listDir(id, path);
       if (mySeq !== seq) return;
+      // New directory = fresh tree; drop any prior expansion state.
+      expanded.clear();
+      childrenMap.clear();
+      loadingChildren.clear();
       entries = sortEntries(result);
       selectedIndex = entries.length > 0 ? 0 : -1;
     } catch (e) {
@@ -214,7 +273,7 @@
   }
 
   export function selected(): Entry | null {
-    return selectedIndex >= 0 && selectedIndex < entries.length ? entries[selectedIndex] : null;
+    return visibleRows[selectedIndex]?.entry ?? null;
   }
 
   function cancelConfirm() {
@@ -265,8 +324,8 @@
   }
 
   function moveSelection(delta: number) {
-    if (entries.length === 0) return;
-    selectedIndex = Math.min(Math.max(selectedIndex + delta, 0), entries.length - 1);
+    if (visibleRows.length === 0) return;
+    selectedIndex = Math.min(Math.max(selectedIndex + delta, 0), visibleRows.length - 1);
     cancelConfirm();
     scrollSelectedIntoView();
   }
@@ -317,7 +376,7 @@
     if (typeaheadTimer) clearTimeout(typeaheadTimer);
     typeahead += char.toLowerCase();
     typeaheadTimer = setTimeout(() => (typeahead = ""), 700);
-    const match = entries.findIndex((e) => e.name.toLowerCase().startsWith(typeahead));
+    const match = visibleRows.findIndex((r) => r.entry.name.toLowerCase().startsWith(typeahead));
     if (match >= 0) {
       selectedIndex = match;
       scrollSelectedIntoView();
@@ -326,13 +385,19 @@
 
   function onkeydown(e: KeyboardEvent) {
     if (renamingPath) return;
-    const selected = selectedIndex >= 0 ? entries[selectedIndex] : null;
+    const selected = visibleRows[selectedIndex]?.entry ?? null;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       moveSelection(1);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       moveSelection(-1);
+    } else if (e.key === "ArrowRight" && selected?.kind === "dir" && !expanded.has(selected.path)) {
+      e.preventDefault();
+      toggleExpand(selected);
+    } else if (e.key === "ArrowLeft" && selected?.kind === "dir" && expanded.has(selected.path)) {
+      e.preventDefault();
+      toggleExpand(selected);
     } else if (e.key === "Enter" && selected) {
       e.preventDefault();
       open(selected);
@@ -411,13 +476,14 @@
   {:else if !loading && entries.length === 0}
     <div class="state"><p class="muted">Empty folder</p></div>
   {:else}
-    {#each entries as entry, i (entry.path)}
+    {#each visibleRows as { entry, depth }, i (entry.path)}
       <div
         class="row"
         class:selected={selectedIndex === i}
         role="option"
         aria-selected={selectedIndex === i}
         tabindex="-1"
+        style="padding-left: {12 + depth * 15}px"
         onclick={() => {
           selectedIndex = i;
           cancelConfirm();
@@ -430,6 +496,21 @@
         onkeydown={() => {}}
       >
         <span class="col-name">
+          {#if entry.kind === "dir"}
+            <button
+              class="caret"
+              title={expanded.has(entry.path) ? "Collapse" : "Expand"}
+              aria-label={expanded.has(entry.path) ? "Collapse" : "Expand"}
+              onclick={(e) => {
+                e.stopPropagation();
+                toggleExpand(entry);
+              }}
+            >
+              <Icon name={expanded.has(entry.path) ? "chevron-down" : "chevron-right"} size={14} />
+            </button>
+          {:else}
+            <span class="caret-spacer" aria-hidden="true"></span>
+          {/if}
           <span class="glyph" class:dir={entry.kind === "dir"} aria-hidden="true">
             <Icon name={iconForEntry(entry)} size={16} />
           </span>
@@ -529,8 +610,29 @@
     flex: 1;
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 5px;
     min-width: 0;
+  }
+  .caret {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 3px;
+    color: var(--fg-secondary);
+  }
+  .caret:hover {
+    background: var(--bg-hover);
+    color: var(--fg-primary);
+  }
+  .caret-spacer {
+    flex-shrink: 0;
+    width: 16px;
   }
   .name {
     overflow: hidden;

@@ -25,3 +25,18 @@ img { -webkit-user-drag: none; pointer-events: none; }
 
 /* selectable where text genuinely is content */
 .selectable { user-select: text; cursor: text; }
+
+/* Slim, unobtrusive scrollbars (WebKitGTK) — the default wide gutter reads as
+   stray right-edge padding. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-secondary);
+  background-clip: content-box;
+}

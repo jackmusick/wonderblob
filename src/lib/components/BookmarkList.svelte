@@ -208,7 +208,7 @@
 
 <div class="section-header">
   <span class="section-label">Connections</span>
-  <button class="icon-btn" title="New connection" aria-label="New connection" onclick={onnew}>
+  <button class="icon-btn header-add" title="New connection" aria-label="New connection" onclick={onnew}>
     <Icon name="plus" size={16} />
   </button>
 </div>
@@ -403,6 +403,13 @@
   .icon-btn:hover {
     background: var(--bg-hover);
     color: var(--fg-primary);
+  }
+  /* The header "+" is a clean square, not a text-padded action button. */
+  .header-add {
+    width: 22px;
+    height: 22px;
+    min-width: 0;
+    padding: 0;
   }
   .icon-btn.confirming {
     color: var(--fg-primary);

@@ -5,6 +5,7 @@
   import { formatSpeed, percent } from "$lib/transfer-format";
   import { activeConnection } from "$lib/stores/session";
   import { clearCompleted, transferList, transferSpeed } from "$lib/stores/transfers";
+  import Icon from "./Icon.svelte";
 
   let {
     onerror,
@@ -76,7 +77,9 @@
           bind:this={rowEls[i]}
           onkeydown={(e) => onRowKeydown(e, i)}
         >
-          <span class="dir" aria-hidden="true">{t.direction === "down" ? "▼" : "▲"}</span>
+          <span class="dir" aria-hidden="true" title={t.direction === "down" ? "Download" : "Upload"}>
+            <Icon name={t.direction === "down" ? "download" : "upload"} size={13} />
+          </span>
           <span class="name" title={t.name}>{t.name}</span>
           <div class="bar" class:indeterminate={pct === -1} aria-hidden="true">
             {#if pct >= 0}
@@ -115,7 +118,7 @@
     </div>
   {/if}
   <div class="footer">
-    <button class="ghost" onclick={() => run(clearCompleted)}>Clear completed</button>
+    <button class="ghost" onclick={() => run(clearCompleted)}>Clear finished</button>
   </div>
 </div>
 
@@ -151,9 +154,10 @@
   }
   .dir {
     flex-shrink: 0;
-    width: 12px;
-    text-align: center;
-    font-size: var(--text-small);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
     color: var(--fg-secondary);
   }
   .name {
