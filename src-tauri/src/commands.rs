@@ -8,6 +8,7 @@ use tauri::{Manager, State};
 use wonderblob_core::azblob::{AzAuth, AzBlobBackend, AzBlobConfig};
 use wonderblob_core::edit::{image_mime, preview_plan, PreviewPlan, PREVIEW_CAP_BYTES};
 use wonderblob_core::error::StorageError;
+use wonderblob_core::onedrive::{OneDriveBackend, OneDriveConfig, RefreshingTokenProvider};
 use wonderblob_core::s3::{S3Backend, S3Config};
 use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
 use wonderblob_core::transfer::engine::TransferEngine;
@@ -153,6 +154,94 @@ pub async fn connect_azblob(
         detail: "connection timed out".into(),
     })??;
     Ok(register(&state, Arc::new(backend)).await)
+}
+
+// ---------------------------------------------------------------------------
+// OneDrive (interactive OAuth + silent-refresh bookmark connect)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OneDriveConnectArgs {
+    pub bookmark_id: uuid::Uuid,
+    pub client_id_override: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OneDriveConnectResult {
+    pub id: ConnectionId,
+    pub capabilities: Capabilities,
+    pub account_label: Option<String>,
+}
+
+/// Graph v1.0 base for the live drive (the testable core takes this injected).
+const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
+
+/// Build a OneDrive backend whose token provider silently refreshes and
+/// re-persists any rotated refresh token to the keychain under `key`.
+fn build_onedrive_backend(
+    app: &tauri::AppHandle,
+    key: &str,
+    client_id: &str,
+    refresh_token: String,
+) -> Arc<dyn StorageBackend> {
+    let app = app.clone();
+    let key_for_rotate = key.to_string();
+    let on_rotate: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |new_rt: String| {
+        // Persist the rotated refresh token off the async runtime (KWallet /
+        // secret-service can block). Fire-and-forget; the in-memory provider
+        // still has the new token for this session even if the write lags.
+        let _ = app;
+        let k = key_for_rotate.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let _ = secrets::set(&k, &new_rt);
+        });
+    });
+    let token = Arc::new(RefreshingTokenProvider::new(
+        reqwest::Client::new(),
+        crate::onedrive_auth::AUTH_BASE.to_string(),
+        client_id.to_string(),
+        refresh_token,
+        on_rotate,
+    ));
+    Arc::new(OneDriveBackend::new(OneDriveConfig {
+        base_url: GRAPH_BASE.to_string(),
+        token,
+    }))
+}
+
+/// Interactive sign-in: runs OAuth in the system browser (custom-scheme
+/// `wonderblob://auth` redirect caught via deep link), stores the refresh token
+/// in the keychain under `bookmark_id`, and registers a OneDrive backend.
+///
+/// This is the thin Tauri shell around the headless-tested core; the
+/// browser/deep-link half is exercised by the manual OAuth smoke (Jack-gated).
+#[tauri::command]
+pub async fn connect_onedrive(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    router: State<'_, crate::onedrive_auth::DeepLinkRouter>,
+    args: OneDriveConnectArgs,
+) -> Result<OneDriveConnectResult, StorageError> {
+    let client_id = args
+        .client_id_override
+        .clone()
+        .unwrap_or_else(|| crate::onedrive_auth::DEFAULT_CLIENT_ID.to_string());
+    // No CONNECT_TIMEOUT: the user may take a while in the browser; the OAuth
+    // module enforces its own 15-min cap.
+    let login = crate::onedrive_auth::interactive_login(&app, &router, &client_id).await?;
+    let key = args.bookmark_id.to_string();
+    let k = key.clone();
+    let rt = login.refresh_token.clone();
+    keychain(move || secrets::set(&k, &rt)).await?;
+    let backend = build_onedrive_backend(&app, &key, &client_id, login.refresh_token);
+    let res = register(&state, backend).await;
+    Ok(OneDriveConnectResult {
+        id: res.id,
+        capabilities: res.capabilities,
+        account_label: login.account_label,
+    })
 }
 
 #[tauri::command]
@@ -503,6 +592,25 @@ pub async fn connect_bookmark(
                 detail: "connection timed out".into(),
             })??;
             Arc::new(backend)
+        }
+        Protocol::OneDrive => {
+            let p = b.onedrive.ok_or_else(|| StorageError::Other {
+                detail: "OneDrive bookmark missing params".into(),
+            })?;
+            let k = key.clone();
+            // The keychain secret is the OAuth refresh token. Absent => the user
+            // must sign in again (UI re-runs connect_onedrive).
+            let refresh =
+                keychain(move || secrets::get(&k))
+                    .await?
+                    .ok_or(StorageError::AuthFailed {
+                        detail: "no saved OneDrive session — sign in again".into(),
+                    })?;
+            let client_id = p
+                .client_id_override
+                .unwrap_or_else(|| crate::onedrive_auth::DEFAULT_CLIENT_ID.to_string());
+            // Silent refresh happens lazily on the first Graph request.
+            build_onedrive_backend(&app, &key, &client_id, refresh)
         }
     };
     Ok(register(&state, backend).await)

@@ -22,12 +22,23 @@
   }
 
   function protoBadge(p: Bookmark["protocol"]): string {
-    return p === "sftp" ? "SFTP" : p === "s3" ? "S3" : "Azure";
+    switch (p) {
+      case "sftp":
+        return "SFTP";
+      case "s3":
+        return "S3";
+      case "azBlob":
+        return "Azure";
+      case "oneDrive":
+        return "OneDrive";
+    }
   }
 
   function rowTitle(b: Bookmark): string {
     if (b.protocol === "sftp") return `${b.username ?? ""}@${b.host ?? ""}:${b.port ?? 22}`;
     if (b.protocol === "s3") return b.s3?.endpoint ?? `S3 (${b.s3?.region ?? "aws"})`;
+    if (b.protocol === "oneDrive")
+      return b.onedrive?.accountLabel ?? "OneDrive for Business";
     return b.azblob?.endpoint ?? `Azure (${b.azblob?.account ?? ""})`;
   }
 
@@ -35,12 +46,20 @@
     reload();
   });
 
-  function errorMessage(e: unknown): { message: string; detail: string } {
+  function errorMessage(e: unknown, b?: Bookmark): { message: string; detail: string } {
     const err = e as StorageError;
     const detail = typeof err?.detail === "string" ? err.detail : String(e);
     switch (err?.kind) {
       case "authFailed":
-        return { message: "Authentication failed", detail };
+        // OneDrive re-auth: the refresh token expired/was revoked. The user
+        // re-opens the sheet to "Sign in with Microsoft" again.
+        return {
+          message:
+            b?.protocol === "oneDrive"
+              ? "Sign in again — open to re-authenticate"
+              : "Authentication failed",
+          detail,
+        };
       case "network":
         return { message: "Can't reach server", detail };
       default:
@@ -58,7 +77,7 @@
       activeConnection.set({ id: res.id, bookmark: b, capabilities: res.capabilities });
       currentPath.set(b.initialPath ?? "/");
     } catch (e) {
-      errors = { ...errors, [b.id]: errorMessage(e) };
+      errors = { ...errors, [b.id]: errorMessage(e, b) };
     } finally {
       connectingId = null;
     }

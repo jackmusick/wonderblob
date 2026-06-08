@@ -3,6 +3,7 @@ mod commands;
 mod edit;
 #[cfg(test)]
 mod fake_backend;
+mod onedrive_auth;
 mod state;
 mod transfers;
 
@@ -14,6 +15,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(state::AppState::default())
         .setup(|app| {
             let conns = app.state::<state::AppState>().connections.clone();
@@ -21,12 +23,19 @@ pub fn run() {
             app.manage(engine);
             let edit = edit::init_edit(app.handle(), conns);
             app.manage(edit);
+            // Install the single deep-link handler + register the `wonderblob://`
+            // custom scheme so the OneDrive OAuth callback is delivered (needed
+            // for `tauri dev` on Linux). The router fans callbacks out to the
+            // active sign-in.
+            let router = onedrive_auth::init_deep_link(app.handle());
+            app.manage(router);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect_sftp,
             commands::connect_s3,
             commands::connect_azblob,
+            commands::connect_onedrive,
             commands::share_link,
             commands::disconnect,
             commands::list_dir,

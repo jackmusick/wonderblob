@@ -25,6 +25,13 @@ jobs:
 
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `cargo test --workspace` already runs the in-process OneDrive coverage:
+      # `tests/onedrive_mock.rs` (wiremock-mocked Graph) needs no network, no
+      # secret, and no Docker fixture — Microsoft Graph isn't self-hostable like
+      # MinIO/Azurite, so there is intentionally no fixture step for OneDrive.
+      # The real-tenant `tests/onedrive_live.rs` is interactive (OAuth) and stays
+      # out of CI; it self-skips unless WONDERBLOB_TEST_ONEDRIVE=1 plus a refresh
+      # token + client id are present.
       - run: cargo test --workspace
 
       - name: SFTP contract + transfer resume tests
