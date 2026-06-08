@@ -1,12 +1,24 @@
 <script lang="ts">
-  import type { Bookmark } from "$lib/api";
+  import { open } from "@tauri-apps/plugin-dialog";
+  import { api, type Bookmark, type StorageError } from "$lib/api";
   import BookmarkList from "$lib/components/BookmarkList.svelte";
+  import Breadcrumb from "$lib/components/Breadcrumb.svelte";
   import ConnectionSheet from "$lib/components/ConnectionSheet.svelte";
-  import { activeConnection } from "$lib/stores/session";
+  import FileList from "$lib/components/FileList.svelte";
+  import { activeConnection, currentPath } from "$lib/stores/session";
 
   let sheetOpen = $state(false);
   let editing = $state<Bookmark | null>(null);
   let list = $state<BookmarkList | null>(null);
+  let fileList = $state<FileList | null>(null);
+
+  let newFolderOpen = $state(false);
+  let newFolderName = $state("");
+  let newFolderInput = $state<HTMLInputElement | null>(null);
+  let uploading = $state(false);
+
+  let toast = $state<string | null>(null);
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
   function openNew() {
     editing = null;
@@ -24,6 +36,90 @@
     closeSheet();
     await list?.reload();
   }
+
+  function showToast(message: string) {
+    toast = message;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => (toast = null), 5000);
+  }
+
+  function opError(e: unknown, fallback: string): string {
+    const err = e as StorageError;
+    switch (err?.kind) {
+      case "permissionDenied":
+        return `${fallback}: permission denied.`;
+      case "network":
+        return `${fallback}: can't reach the server.`;
+      case "quotaExceeded":
+        return `${fallback}: not enough space.`;
+      case "conflict":
+        return `${fallback}: name already exists.`;
+      default:
+        return `${fallback}.`;
+    }
+  }
+
+  function joinPath(dir: string, name: string): string {
+    return dir === "/" ? `/${name}` : `${dir}/${name}`;
+  }
+
+  async function upload() {
+    const conn = $activeConnection;
+    if (!conn || uploading) return;
+    const selected = await open({ multiple: false, directory: false, title: "Upload file" });
+    if (typeof selected !== "string") return;
+    const basename = selected.replace(/\/+$/, "").split(/[\\/]/).pop();
+    if (!basename) return;
+    uploading = true;
+    try {
+      await api.uploadFile(conn.id, selected, joinPath($currentPath, basename));
+      fileList?.refresh();
+    } catch (e) {
+      showToast(opError(e, `Couldn't upload “${basename}”`));
+    } finally {
+      uploading = false;
+    }
+  }
+
+  function openNewFolder() {
+    newFolderName = "";
+    newFolderOpen = true;
+  }
+
+  $effect(() => {
+    if (newFolderOpen && newFolderInput) newFolderInput.focus();
+  });
+
+  async function commitNewFolder() {
+    const conn = $activeConnection;
+    const name = newFolderName.trim();
+    newFolderOpen = false;
+    if (!conn || !name) return;
+    try {
+      await api.makeDir(conn.id, joinPath($currentPath, name));
+      fileList?.refresh();
+    } catch (e) {
+      showToast(opError(e, `Couldn't create “${name}”`));
+    }
+  }
+
+  function newFolderKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitNewFolder();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      newFolderOpen = false;
+    }
+  }
+
+  async function disconnect() {
+    const conn = $activeConnection;
+    if (!conn) return;
+    activeConnection.set(null);
+    currentPath.set("/");
+    api.disconnect(conn.id).catch(() => {});
+  }
 </script>
 
 <div class="shell">
@@ -33,11 +129,33 @@
   <main class="content">
     {#if $activeConnection}
       <div class="toolbar">
-        <!-- breadcrumb + actions mount here (Task 10) -->
+        <Breadcrumb />
+        <div class="actions">
+          {#if newFolderOpen}
+            <input
+              class="folder-input"
+              bind:this={newFolderInput}
+              bind:value={newFolderName}
+              placeholder="Folder name"
+              aria-label="New folder name"
+              onkeydown={newFolderKeydown}
+              onblur={() => (newFolderOpen = false)}
+            />
+          {:else}
+            <button class="ghost" onclick={openNewFolder}>New Folder</button>
+          {/if}
+          <button class="ghost" onclick={upload} disabled={uploading}>
+            {uploading ? "Uploading…" : "Upload"}
+          </button>
+          <button class="ghost" onclick={disconnect}>Disconnect</button>
+        </div>
       </div>
       <div class="browser">
-        <!-- FileList mounts here (Task 10) -->
+        <FileList bind:this={fileList} onerror={showToast} />
       </div>
+      {#if toast}
+        <div class="toast" role="alert">{toast}</div>
+      {/if}
     {:else}
       <div class="empty">
         <p>Connect to a server to get started</p>
@@ -60,7 +178,7 @@
     padding: 8px;
     flex-shrink: 0;
   }
-  .content { flex: 1; display: flex; flex-direction: column; background: var(--bg-content); }
+  .content { flex: 1; display: flex; flex-direction: column; background: var(--bg-content); min-width: 0; }
   .toolbar {
     height: 44px;
     border-bottom: 1px solid var(--border);
@@ -70,7 +188,51 @@
     gap: 8px;
     flex-shrink: 0;
   }
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .ghost {
+    height: 24px;
+    padding: 0 9px;
+    font-size: var(--text-base);
+    font-family: var(--font-ui);
+    color: var(--fg-secondary);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius);
+    white-space: nowrap;
+  }
+  .ghost:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--fg-primary);
+  }
+  .ghost:disabled {
+    opacity: 0.55;
+  }
+  .folder-input {
+    width: 160px;
+    height: 24px;
+    padding: 0 7px;
+    font-size: var(--text-base);
+    font-family: var(--font-ui);
+    color: var(--fg-primary);
+    background: var(--bg-content);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    outline: none;
+  }
   .browser { flex: 1; overflow-y: auto; }
+  .toast {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    font-size: var(--text-small);
+    color: var(--danger);
+    border-top: 1px solid var(--border);
+    background: var(--bg-content);
+  }
   .empty {
     flex: 1;
     display: flex;
