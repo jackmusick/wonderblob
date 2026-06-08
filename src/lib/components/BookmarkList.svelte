@@ -8,6 +8,8 @@
   } from "../api";
   import { activeConnection, currentPath } from "../stores/session";
   import HostKeyDialog from "./HostKeyDialog.svelte";
+  import Icon from "./Icon.svelte";
+  import ContextMenu, { type MenuItem } from "./ContextMenu.svelte";
 
   let {
     onnew,
@@ -23,22 +25,57 @@
   let errors = $state<Record<string, { message: string; detail: string }>>({});
   let confirmingDeleteId = $state<string | null>(null);
   let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+  let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
   export async function reload() {
     bookmarks = await api.bookmarksList();
   }
 
-  function protoBadge(p: Bookmark["protocol"]): string {
+  function protoIcon(p: Bookmark["protocol"]): string {
     switch (p) {
       case "sftp":
-        return "SFTP";
+        return "sftp";
       case "s3":
-        return "S3";
+        return "s3";
       case "azBlob":
-        return "Azure";
+        return "azure";
       case "oneDrive":
-        return "OneDrive";
+        return "onedrive";
     }
+  }
+
+  /** Tear down the active connection (mirrors the old toolbar Disconnect). */
+  function disconnectActive() {
+    const active = $activeConnection;
+    if (!active) return;
+    activeConnection.set(null);
+    currentPath.set("/");
+    api.disconnect(active.id).catch(() => {});
+  }
+
+  /** Single click toggles: connect, or disconnect if already the live one. */
+  function toggle(b: Bookmark) {
+    if ($activeConnection?.bookmark.id === b.id) disconnectActive();
+    else connect(b);
+  }
+
+  function rowMenuItems(b: Bookmark): MenuItem[] {
+    const isActive = $activeConnection?.bookmark.id === b.id;
+    return [
+      isActive
+        ? { label: "Disconnect", icon: "power", action: () => disconnectActive() }
+        : { label: "Connect", icon: "power", action: () => connect(b) },
+      { label: "Edit…", icon: "pencil", action: () => onedit(b) },
+      { separator: true },
+      { label: "Delete", icon: "trash", danger: true, action: () => doDelete(b) },
+    ];
+  }
+
+  function openRowMenu(e: MouseEvent, i: number, b: Bookmark) {
+    e.preventDefault();
+    e.stopPropagation();
+    focusedIndex = i;
+    menu = { x: e.clientX, y: e.clientY, items: rowMenuItems(b) };
   }
 
   function rowTitle(b: Bookmark): string {
@@ -172,7 +209,7 @@
 <div class="section-header">
   <span class="section-label">Connections</span>
   <button class="icon-btn" title="New connection" aria-label="New connection" onclick={onnew}>
-    +
+    <Icon name="plus" size={16} />
   </button>
 </div>
 
@@ -193,16 +230,33 @@
         role="option"
         aria-selected={selected}
         tabindex="-1"
-        ondblclick={() => connect(b)}
-        onclick={() => (focusedIndex = i)}
+        onclick={() => {
+          focusedIndex = i;
+          toggle(b);
+        }}
+        oncontextmenu={(e) => openRowMenu(e, i, b)}
         onkeydown={() => {}}
       >
+        <span class="proto" class:connected={selected} aria-hidden="true">
+          <Icon name={protoIcon(b.protocol)} size={16} />
+        </span>
         <span class="label" title={rowTitle(b)}>{b.label}</span>
-        <span class="badge">{protoBadge(b.protocol)}</span>
         {#if connectingId === b.id}
           <span class="hint">connecting…</span>
         {:else}
+          {#if selected}<span class="dot" title="Connected" aria-label="Connected"></span>{/if}
           <span class="row-actions">
+            {#if selected}
+              <button
+                class="icon-btn"
+                title="Disconnect"
+                aria-label="Disconnect {b.label}"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  disconnectActive();
+                }}><Icon name="power" size={15} /></button
+              >
+            {/if}
             <button
               class="icon-btn"
               title="Edit"
@@ -210,7 +264,7 @@
               onclick={(e) => {
                 e.stopPropagation();
                 onedit(b);
-              }}>✎</button
+              }}><Icon name="pencil" size={15} /></button
             >
             <button
               class="icon-btn"
@@ -220,8 +274,10 @@
               onclick={(e) => {
                 e.stopPropagation();
                 requestDelete(b);
-              }}>{confirmingDeleteId === b.id ? "Delete?" : "×"}</button
+              }}
             >
+              {#if confirmingDeleteId === b.id}Delete?{:else}<Icon name="trash" size={15} />{/if}
+            </button>
           </span>
         {/if}
       </div>
@@ -231,6 +287,10 @@
     </div>
   {/each}
 </div>
+
+{#if menu}
+  <ContextMenu x={menu.x} y={menu.y} items={menu.items} onclose={() => (menu = null)} />
+{/if}
 
 {#if hostKeyPrompt}
   <HostKeyDialog
@@ -282,6 +342,15 @@
     outline: 1px solid var(--accent);
     outline-offset: -1px;
   }
+  .proto {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    color: var(--fg-secondary);
+  }
+  .proto.connected {
+    color: var(--accent);
+  }
   .label {
     flex: 1;
     overflow: hidden;
@@ -294,18 +363,16 @@
     font-size: var(--text-small);
     color: var(--fg-secondary);
   }
-  .badge {
+  /* Green presence dot on the live connection; hidden while hover actions show. */
+  .dot {
     flex-shrink: 0;
-    padding: 0 5px;
-    font-size: var(--text-small);
-    color: var(--fg-secondary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    line-height: 16px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #3fb950;
   }
-  /* Hide the badge while the row shows its hover actions, to avoid crowding. */
-  .row:hover .badge,
-  .row:focus-within .badge {
+  .row:hover .dot,
+  .row:focus-within .dot {
     display: none;
   }
   /* Hidden until hover or keyboard focus lands inside the row, but the
