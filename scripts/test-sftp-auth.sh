@@ -38,8 +38,13 @@ eval "$(ssh-agent -s)" >/dev/null
 AGENT_PID="$SSH_AGENT_PID"
 ssh-add -q "$KEY"
 
+# WONDERBLOB_SSH_CONFIG=/dev/null isolates the agent test from the developer's
+# real ~/.ssh/config: an IdentityAgent there (e.g. 1Password) now takes
+# precedence over $SSH_AUTH_SOCK (matching ssh), which would otherwise bypass
+# the throwaway agent this harness sets up.
 WONDERBLOB_TEST_SFTP=1 \
 WONDERBLOB_TEST_KEYFILE="$KEY" \
 WONDERBLOB_TEST_KEYFILE_PP="$KEY_PP" \
 SSH_AUTH_SOCK="$SSH_AUTH_SOCK" \
+WONDERBLOB_SSH_CONFIG=/dev/null \
 cargo test -p wonderblob-core --test sftp_agent -- --nocapture

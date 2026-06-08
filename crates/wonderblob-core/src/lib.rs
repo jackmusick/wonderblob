@@ -6,5 +6,6 @@ pub mod objstore;
 pub mod onedrive;
 pub mod s3;
 pub mod sftp;
+mod ssh_agent;
 pub mod transfer;
 pub mod vfs;
