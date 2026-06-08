@@ -21,21 +21,25 @@
 //! synthesize immediate child directories client-side from the key segments.
 
 use crate::error::{Result, StorageError};
-use crate::objstore::{basename, ObjPath};
+use crate::objstore::{basename, ObjPath, PART_SIZE};
 use crate::vfs::{Capabilities, Entry, EntryKind, StorageBackend};
 use async_trait::async_trait;
-use azure_core::http::Url;
+use azure_core::http::{RequestContent, Url, XmlFormat};
 use azure_storage_blob::models::{
     BlobClientDownloadOptions, BlobClientGetPropertiesResultHeaders,
-    BlobContainerClientListBlobsOptions, HttpRange,
+    BlobContainerClientListBlobsOptions, BlockLookupList, HttpRange,
 };
-use azure_storage_blob::BlobServiceClient;
+use azure_storage_blob::{BlobServiceClient, BlockBlobClient};
 use base64::Engine as _;
+use bytes::BytesMut;
 use futures::StreamExt;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// SAS service version. Azurite's newest supported API version; the SDK's own
@@ -149,7 +153,13 @@ fn parse_connection_string(cs: &str) -> Result<(String, String, Option<String>)>
 impl AzBlobBackend {
     pub async fn connect(cfg: AzBlobConfig) -> Result<Self> {
         let (account, key_b64, endpoint, can_sign, sas_token) = match cfg.auth {
-            AzAuth::AccountKey(k) => (cfg.account.clone(), Some(k), cfg.endpoint.clone(), true, None),
+            AzAuth::AccountKey(k) => (
+                cfg.account.clone(),
+                Some(k),
+                cfg.endpoint.clone(),
+                true,
+                None,
+            ),
             AzAuth::ConnectionString(cs) => {
                 let (a, k, ep) = parse_connection_string(&cs)?;
                 let endpoint = cfg.endpoint.clone().or(ep);
@@ -238,7 +248,12 @@ impl AzBlobBackend {
     /// (found_marker, has_children) for the synthesized dir at `prefix`.
     /// `found_marker` is the dir's own `prefix` blob; `has_children` is any blob
     /// strictly underneath it.
-    async fn dir_children(&self, container: &str, prefix: &str, path: &str) -> Result<(bool, bool)> {
+    async fn dir_children(
+        &self,
+        container: &str,
+        prefix: &str,
+        path: &str,
+    ) -> Result<(bool, bool)> {
         let cc = self.service.blob_container_client(container);
         let opts = BlobContainerClientListBlobsOptions {
             prefix: Some(prefix.to_string()),
@@ -262,6 +277,31 @@ impl AzBlobBackend {
         Ok((found_marker, has_children))
     }
 
+    /// Server has no copy API in the GA SDK: download the source blob fully and
+    /// re-upload it to the destination. Used by `rename` (files + dir markers).
+    async fn copy_blob(
+        &self,
+        src_container: &str,
+        src_key: &str,
+        dst_container: &str,
+        dst_key: &str,
+        errctx: &str,
+    ) -> Result<()> {
+        let src = self
+            .service
+            .blob_container_client(src_container)
+            .blob_client(src_key);
+        let resp = src.download(None).await.map_err(|e| map_az(errctx, e))?;
+        let data = resp.body.collect().await.map_err(|e| map_az(errctx, e))?;
+        self.service
+            .blob_container_client(dst_container)
+            .blob_client(dst_key)
+            .upload(RequestContent::from(data.to_vec()), None)
+            .await
+            .map(|_| ())
+            .map_err(|e| map_az(errctx, e))
+    }
+
     async fn list_containers(&self) -> Result<Vec<Entry>> {
         let mut out: Vec<Entry> = Vec::new();
         let mut pager = self
@@ -280,7 +320,7 @@ impl AzBlobBackend {
                 });
             }
         }
-        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        out.sort_by_key(|e| e.name.to_lowercase());
         Ok(out)
     }
 }
@@ -474,29 +514,330 @@ impl StorageBackend for AzBlobBackend {
         Ok(Box::new(tokio_util::io::StreamReader::new(stream)))
     }
 
-    async fn write(&self, _path: &str) -> Result<Box<dyn AsyncWrite + Send + Unpin>> {
-        Err(StorageError::Unsupported {
-            op: "azblob write (Task 7)".into(),
-        })
+    async fn write(&self, path: &str) -> Result<Box<dyn AsyncWrite + Send + Unpin>> {
+        let p = ObjPath::parse(path);
+        let container = p.container.ok_or_else(|| StorageError::Unsupported {
+            op: "cannot write at the container-list root".into(),
+        })?;
+        if p.key.is_empty() {
+            return Err(StorageError::Unsupported {
+                op: "cannot write a container".into(),
+            });
+        }
+        let blob = self
+            .service
+            .blob_container_client(&container)
+            .blob_client(&p.key)
+            .block_blob_client();
+        Ok(Box::new(AzBlockWriter {
+            blob: Arc::new(blob),
+            buf: BytesMut::with_capacity(PART_SIZE),
+            block_index: 0,
+            block_ids: Vec::new(),
+            state: WState::Idle,
+        }))
     }
-    async fn delete(&self, _path: &str) -> Result<()> {
-        Err(StorageError::Unsupported {
-            op: "azblob delete (Task 7)".into(),
-        })
+
+    async fn delete(&self, path: &str) -> Result<()> {
+        let p = ObjPath::parse(path);
+        let container = p
+            .container
+            .ok_or_else(|| StorageError::NotFound { path: path.into() })?;
+        if p.key.is_empty() {
+            return Err(StorageError::Unsupported {
+                op: "refusing to delete a container".into(),
+            });
+        }
+        let cc = self.service.blob_container_client(&container);
+        // File?
+        let bc = cc.blob_client(&p.key);
+        match bc.get_properties(None).await {
+            Ok(_) => {
+                return bc
+                    .delete(None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| map_az(path, e));
+            }
+            Err(e) => {
+                let mapped = map_az(path, e);
+                if !matches!(mapped, StorageError::NotFound { .. }) {
+                    return Err(mapped);
+                }
+            }
+        }
+        // Directory: inspect children, excluding the dir's own marker.
+        let prefix = Self::dir_prefix(&p.key);
+        let (found_marker, has_children) = self.dir_children(&container, &prefix, path).await?;
+        if !found_marker && !has_children {
+            return Err(StorageError::NotFound { path: path.into() });
+        }
+        if has_children {
+            return Err(StorageError::Conflict {
+                path: path.into(),
+                detail: "directory not empty".into(),
+            });
+        }
+        // Only the marker remains → delete it.
+        cc.blob_client(&prefix)
+            .delete(None)
+            .await
+            .map(|_| ())
+            .map_err(|e| map_az(path, e))
     }
-    async fn rename(&self, _from: &str, _to: &str) -> Result<()> {
-        Err(StorageError::Unsupported {
-            op: "azblob rename (Task 7)".into(),
-        })
+
+    async fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let pf = ObjPath::parse(from);
+        let pt = ObjPath::parse(to);
+        let cf = pf
+            .container
+            .ok_or_else(|| StorageError::NotFound { path: from.into() })?;
+        let ct = pt
+            .container
+            .ok_or_else(|| StorageError::NotFound { path: to.into() })?;
+        if pf.key.is_empty() || pt.key.is_empty() {
+            return Err(StorageError::Unsupported {
+                op: "cannot rename a container".into(),
+            });
+        }
+        let src_bc = self.service.blob_container_client(&cf).blob_client(&pf.key);
+        // No native blob rename and no copy API in the GA SDK: read the source
+        // and re-upload to the destination, then delete the source.
+        match src_bc.get_properties(None).await {
+            Ok(_) => {
+                self.copy_blob(&cf, &pf.key, &ct, &pt.key, from).await?;
+                src_bc
+                    .delete(None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| map_az(from, e))
+            }
+            Err(e) => {
+                let mapped = map_az(from, e);
+                if !matches!(mapped, StorageError::NotFound { .. }) {
+                    return Err(mapped);
+                }
+                // Directory rename: refuse non-empty (v1); move marker if empty.
+                let prefix = Self::dir_prefix(&pf.key);
+                let (found_marker, has_children) = self.dir_children(&cf, &prefix, from).await?;
+                if !found_marker && !has_children {
+                    return Err(StorageError::NotFound { path: from.into() });
+                }
+                if has_children {
+                    return Err(StorageError::Conflict {
+                        path: from.into(),
+                        detail: "renaming a non-empty directory is not supported (v1)".into(),
+                    });
+                }
+                let new_marker = Self::dir_prefix(&pt.key);
+                self.copy_blob(&cf, &prefix, &ct, &new_marker, from).await?;
+                self.service
+                    .blob_container_client(&cf)
+                    .blob_client(&prefix)
+                    .delete(None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| map_az(from, e))
+            }
+        }
     }
-    async fn mkdir(&self, _path: &str) -> Result<()> {
-        Err(StorageError::Unsupported {
-            op: "azblob mkdir (Task 7)".into(),
-        })
+
+    async fn mkdir(&self, path: &str) -> Result<()> {
+        let p = ObjPath::parse(path);
+        let container = p.container.ok_or_else(|| StorageError::Unsupported {
+            op: "creating containers is not supported".into(),
+        })?;
+        if p.key.is_empty() {
+            return Err(StorageError::Unsupported {
+                op: "cannot mkdir a container".into(),
+            });
+        }
+        let marker = Self::dir_prefix(&p.key);
+        // Zero-byte marker blob (Azure flat namespace has no real dirs).
+        self.service
+            .blob_container_client(&container)
+            .blob_client(&marker)
+            .upload(RequestContent::from(Vec::new()), None)
+            .await
+            .map(|_| ())
+            .map_err(|e| map_az(path, e))
     }
-    async fn share_link(&self, _path: &str, _expiry: u64) -> Result<String> {
-        Err(StorageError::Unsupported {
-            op: "azblob share_link (Task 7)".into(),
-        })
+
+    async fn share_link(&self, path: &str, expiry_secs: u64) -> Result<String> {
+        let Some(signer) = self.signer.as_ref() else {
+            return Err(StorageError::Unsupported {
+                op: "SAS-token auth cannot mint new share links".into(),
+            });
+        };
+        let p = ObjPath::parse(path);
+        let container = p.container.ok_or_else(|| StorageError::Unsupported {
+            op: "cannot share the container-list root".into(),
+        })?;
+        if p.key.is_empty() {
+            return Err(StorageError::Unsupported {
+                op: "cannot share a container".into(),
+            });
+        }
+        // Read-only, object-scoped account SAS over the blob URL.
+        let mut url = Url::parse(&format!("{}/{}/{}", self.endpoint_base, container, p.key))
+            .map_err(StorageError::other)?;
+        signer.apply_sas(&mut url, "r", "o", &expiry_in(expiry_secs as i64))?;
+        Ok(url.to_string())
+    }
+}
+
+type BoxFut = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+enum WState {
+    Idle,
+    Staging(BoxFut),
+    Committing(BoxFut),
+    Done,
+}
+
+/// Fixed-width raw block id (Azure requires every staged block id to share the
+/// same pre-base64 length). The SDK base64-encodes these for `stage_block` and
+/// the committed block list, so we hand it the raw bytes in both places.
+fn block_id(index: u32) -> Vec<u8> {
+    format!("wb-block-{index:016}").into_bytes()
+}
+
+fn to_io(e: StorageError) -> io::Error {
+    io::Error::other(e.to_string())
+}
+
+/// Buffers 8 MiB blocks, stages each, and commits the block list on
+/// `poll_shutdown`. `Unpin` because every field is `Unpin` (the in-flight
+/// future is boxed). Uncommitted blocks are garbage-collected by Azure
+/// automatically (~7 days), so an abandoned writer needs no explicit cleanup.
+pub struct AzBlockWriter {
+    blob: Arc<BlockBlobClient>,
+    buf: BytesMut,
+    block_index: u32,
+    block_ids: Vec<Vec<u8>>,
+    state: WState,
+}
+
+impl AzBlockWriter {
+    /// Drain the current buffer into a new stage-block future.
+    fn start_stage(&mut self) {
+        let id = block_id(self.block_index);
+        self.block_index += 1;
+        self.block_ids.push(id.clone());
+        let body = self.buf.split().to_vec();
+        let len = body.len() as u64;
+        let blob = self.blob.clone();
+        self.state = WState::Staging(Box::pin(async move {
+            blob.stage_block(&id, len, RequestContent::from(body), None)
+                .await
+                .map_err(|e| map_az("stage_block", e))?;
+            Ok(())
+        }));
+    }
+
+    /// Kick off Put Block List with the staged ids (in stage order).
+    fn start_commit(&mut self) {
+        let blob = self.blob.clone();
+        let ids = std::mem::take(&mut self.block_ids);
+        self.state = WState::Committing(Box::pin(async move {
+            let list = BlockLookupList {
+                latest: Some(ids),
+                ..Default::default()
+            };
+            let content: RequestContent<BlockLookupList, XmlFormat> =
+                list.try_into().map_err(StorageError::other)?;
+            blob.commit_block_list(content, None)
+                .await
+                .map_err(|e| map_az("commit_block_list", e))?;
+            Ok(())
+        }));
+    }
+
+    fn drive_staging(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let poll = match &mut self.state {
+            WState::Staging(fut) => fut.as_mut().poll(cx),
+            _ => return Poll::Ready(Ok(())),
+        };
+        match poll {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => {
+                self.state = WState::Idle;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => {
+                self.state = WState::Done;
+                Poll::Ready(Err(to_io(e)))
+            }
+        }
+    }
+
+    fn drive_committing(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let poll = match &mut self.state {
+            WState::Committing(fut) => fut.as_mut().poll(cx),
+            _ => return Poll::Ready(Ok(())),
+        };
+        match poll {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(r) => {
+                self.state = WState::Done;
+                Poll::Ready(r.map_err(to_io))
+            }
+        }
+    }
+}
+
+impl AsyncWrite for AzBlockWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        // Never accept new bytes while a block stage is in flight.
+        if let WState::Staging(_) = this.state {
+            match this.drive_staging(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        this.buf.extend_from_slice(data);
+        if this.buf.len() >= PART_SIZE {
+            this.start_stage();
+        }
+        Poll::Ready(Ok(data.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // Only drain an in-flight stage; don't force-cut a sub-block-size block.
+        self.get_mut().drive_staging(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        loop {
+            match this.state {
+                WState::Staging(_) => match this.drive_staging(cx) {
+                    Poll::Ready(Ok(())) => continue,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                },
+                WState::Idle => {
+                    // Stage the tail; an all-empty write stages one empty block
+                    // so the committed list has >= 1 block (a 0-byte blob).
+                    if this.block_ids.is_empty() || !this.buf.is_empty() {
+                        this.start_stage();
+                    } else {
+                        this.start_commit();
+                    }
+                }
+                WState::Committing(_) => match this.drive_committing(cx) {
+                    Poll::Ready(Ok(())) => continue,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                },
+                WState::Done => return Poll::Ready(Ok(())),
+            }
+        }
     }
 }
