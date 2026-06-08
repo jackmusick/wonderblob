@@ -174,11 +174,38 @@ pub async fn bookmark_save(
     bookmark: Bookmark,
     secret: Option<String>,
 ) -> Result<(), StorageError> {
+    use crate::bookmarks::AuthMethod;
+    let st = store(&app)?;
+    let existing = st.load_all()?.into_iter().find(|b| b.id == bookmark.id);
+    let is_new = existing.is_none();
+    let key = bookmark.id.to_string();
+    let mut created_secret = false;
     if let Some(s) = secret {
-        let id = bookmark.id.to_string();
-        keychain(move || secrets::set(&id, &s)).await?;
+        let k = key.clone();
+        keychain(move || secrets::set(&k, &s)).await?;
+        created_secret = true;
+    } else {
+        // No new secret supplied: drop any stale keychain entry when the new
+        // method doesn't use one (Agent) or the method changed (e.g. an old
+        // password must not be reused as a key passphrase).  Only when the
+        // method is unchanged and still secret-using do we keep the saved one.
+        let method_changed = existing.as_ref().is_some_and(|e| {
+            std::mem::discriminant(&e.auth_method)
+                != std::mem::discriminant(&bookmark.auth_method)
+        });
+        if matches!(bookmark.auth_method, AuthMethod::Agent) || method_changed {
+            let k = key.clone();
+            keychain(move || secrets::delete(&k)).await?;
+        }
     }
-    store(&app)?.save(&bookmark)
+    let result = st.save(&bookmark);
+    if result.is_err() && created_secret && is_new {
+        // Best-effort orphan cleanup: this save created the secret for a brand
+        // new bookmark id, so nothing else references it.  (For edits, keeping
+        // the previous secret is correct.)
+        let _ = keychain(move || secrets::delete(&key)).await;
+    }
+    result
 }
 
 #[tauri::command]

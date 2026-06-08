@@ -19,6 +19,7 @@
   --fg-secondary: #6e6e73;
   --border: rgba(0, 0, 0, 0.08);
   --accent: #3b73eb;
+  --danger: #d4504c;
   --radius: 6px;
 }
 
@@ -33,5 +34,6 @@
     --fg-secondary: #9b9ba1;
     --border: rgba(255, 255, 255, 0.09);
     --accent: #5e8ef5;
+    --danger: #e5736f;
   }
 }

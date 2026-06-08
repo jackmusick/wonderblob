@@ -92,6 +92,12 @@
     } else if (e.key === "Enter" && focusedIndex >= 0) {
       e.preventDefault();
       connect(bookmarks[focusedIndex]);
+    } else if (e.key === "Delete" && focusedIndex >= 0) {
+      e.preventDefault();
+      requestDelete(bookmarks[focusedIndex]);
+    } else if ((e.key === "F2" || e.key === "e") && focusedIndex >= 0) {
+      e.preventDefault();
+      onedit(bookmarks[focusedIndex]);
     }
   }
 </script>
@@ -208,12 +214,16 @@
     font-size: var(--text-small);
     color: var(--fg-secondary);
   }
+  /* Hidden until hover or keyboard focus lands inside the row, but the
+     buttons stay rendered so they remain in the tab order. */
   .row-actions {
-    display: none;
-    gap: 2px;
-  }
-  .row:hover .row-actions {
     display: flex;
+    gap: 2px;
+    opacity: 0;
+  }
+  .row:hover .row-actions,
+  .row:focus-within .row-actions {
+    opacity: 1;
   }
   .icon-btn {
     display: inline-flex;
@@ -228,7 +238,6 @@
     background: transparent;
     border: none;
     border-radius: var(--radius);
-    cursor: pointer;
   }
   .icon-btn:hover {
     background: var(--bg-hover);
@@ -242,7 +251,7 @@
   }
   .error {
     font-size: var(--text-small);
-    color: var(--fg-secondary);
+    color: var(--danger);
     padding: 1px 8px 4px;
   }
 </style>

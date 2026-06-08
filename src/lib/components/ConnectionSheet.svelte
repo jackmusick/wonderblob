@@ -27,6 +27,15 @@
   let saving = $state(false);
   let error = $state<string | null>(null);
   let firstInput = $state<HTMLInputElement | null>(null);
+  let panelEl = $state<HTMLDivElement | null>(null);
+
+  // Editing a bookmark whose method already stores a secret: blank means keep.
+  const hasSavedSecret = initial != null && initial.authMethod.type !== "agent";
+  let secretPlaceholder = $derived(
+    hasSavedSecret && initial?.authMethod.type === authType
+      ? "Leave blank to keep saved secret"
+      : ""
+  );
 
   $effect(() => {
     firstInput?.focus();
@@ -72,7 +81,29 @@
     if (e.key === "Escape") {
       e.preventDefault();
       onclose();
-    } else if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) {
+    } else if (e.key === "Tab") {
+      // Trap focus inside the dialog: cycle first <-> last focusable.
+      const focusables = Array.from(
+        panelEl?.querySelectorAll<HTMLElement>(
+          "input, select, button:not(:disabled)"
+        ) ?? []
+      );
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const target = e.target as HTMLElement;
+      if (e.shiftKey && (target === first || !panelEl?.contains(target))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (target === last || !panelEl?.contains(target))) {
+        e.preventDefault();
+        first.focus();
+      }
+    } else if (
+      e.key === "Enter" &&
+      !(e.target instanceof HTMLButtonElement) &&
+      !(e.target instanceof HTMLSelectElement)
+    ) {
       e.preventDefault();
       save();
     }
@@ -89,7 +120,7 @@
   onkeydown={onkeydown}
 >
   <div class="backdrop" onclick={onclose} aria-hidden="true"></div>
-  <div class="panel">
+  <div class="panel" bind:this={panelEl}>
     <div class="title">{bookmark ? "Edit Connection" : "New Connection"}</div>
 
     <label class="field">
@@ -129,12 +160,22 @@
       </label>
       <label class="field">
         <span>Key passphrase (optional)</span>
-        <input type="password" bind:value={secret} autocomplete="off" />
+        <input
+          type="password"
+          bind:value={secret}
+          autocomplete="off"
+          placeholder={secretPlaceholder}
+        />
       </label>
     {:else if authType === "password"}
       <label class="field">
         <span>Password</span>
-        <input type="password" bind:value={secret} autocomplete="off" />
+        <input
+          type="password"
+          bind:value={secret}
+          autocomplete="off"
+          placeholder={secretPlaceholder}
+        />
       </label>
     {/if}
 
@@ -226,7 +267,7 @@
   }
   .error {
     font-size: var(--text-small);
-    color: var(--accent);
+    color: var(--danger);
   }
   .actions {
     display: flex;
@@ -241,7 +282,6 @@
     font-family: var(--font-ui);
     border-radius: var(--radius);
     border: 1px solid transparent;
-    cursor: pointer;
   }
   button.ghost {
     background: transparent;
@@ -260,6 +300,5 @@
   }
   button.primary:disabled {
     opacity: 0.5;
-    cursor: default;
   }
 </style>

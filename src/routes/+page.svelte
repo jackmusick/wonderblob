@@ -93,7 +93,6 @@
     background: var(--accent);
     border: none;
     border-radius: var(--radius);
-    cursor: pointer;
   }
   .empty .primary:hover {
     filter: brightness(1.08);
