@@ -9,6 +9,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 russh = "0.46"
+russh-keys = "0.46"
 russh-sftp = "2"
 
 [dev-dependencies]

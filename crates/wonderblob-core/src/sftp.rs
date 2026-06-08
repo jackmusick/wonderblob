@@ -81,21 +81,64 @@ impl SftpBackend {
     }
 }
 
-// Stubs for Task 6 — define so this compiles; they are implemented next task:
+/// Authenticate via the SSH agent at SSH_AUTH_SOCK (1Password, KeePassXC,
+/// OpenSSH ssh-agent, ...). Tries every identity the agent offers; the first
+/// one the server accepts wins. Signing happens inside the agent — private
+/// keys never touch this process.
 async fn authenticate_agent(
-    _session: &mut client::Handle<Handler>,
-    _user: &str,
+    session: &mut client::Handle<Handler>,
+    user: &str,
 ) -> Result<bool> {
-    Err(StorageError::Unsupported { op: "agent auth (Task 6)".into() })
+    let mut agent = russh_keys::agent::client::AgentClient::connect_env()
+        .await
+        .map_err(|e| StorageError::AuthFailed {
+            detail: format!("cannot reach ssh-agent (is SSH_AUTH_SOCK set?): {e}"),
+        })?;
+    let identities =
+        agent.request_identities().await.map_err(|e| StorageError::AuthFailed {
+            detail: format!("ssh-agent refused to list identities: {e}"),
+        })?;
+    if identities.is_empty() {
+        return Err(StorageError::AuthFailed {
+            detail: "ssh-agent has no identities loaded".into(),
+        });
+    }
+    for key in identities {
+        let (returned_agent, result) =
+            session.authenticate_future(user, key, agent).await;
+        agent = returned_agent;
+        match result {
+            Ok(true) => return Ok(true),
+            // Server rejected this identity — try the next one.
+            Ok(false) => continue,
+            // Session channel is gone: the connection itself died.
+            Err(russh::AgentAuthError::Send(e)) => {
+                return Err(StorageError::Network { detail: e.to_string() })
+            }
+            // Agent refused/failed to sign with this key — try the next one.
+            Err(russh::AgentAuthError::Key(_)) => continue,
+        }
+    }
+    Ok(false)
 }
 
+/// Authenticate with an on-disk private key (OpenSSH/PKCS#8 formats),
+/// optionally passphrase-protected.
 async fn authenticate_keyfile(
-    _session: &mut client::Handle<Handler>,
-    _user: &str,
-    _path: &str,
-    _passphrase: Option<&str>,
+    session: &mut client::Handle<Handler>,
+    user: &str,
+    path: &str,
+    passphrase: Option<&str>,
 ) -> Result<bool> {
-    Err(StorageError::Unsupported { op: "keyfile auth (Task 6)".into() })
+    let key = russh_keys::load_secret_key(path, passphrase).map_err(|e| {
+        StorageError::AuthFailed {
+            detail: format!("failed to load key file {path}: {e}"),
+        }
+    })?;
+    session
+        .authenticate_publickey(user, Arc::new(key))
+        .await
+        .map_err(|e| StorageError::Network { detail: e.to_string() })
 }
 
 /// Map russh-sftp errors into the taxonomy using the typed SFTP status code.
