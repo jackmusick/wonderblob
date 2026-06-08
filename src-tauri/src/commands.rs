@@ -161,7 +161,9 @@ pub async fn disconnect(
     edit: State<'_, Arc<EditRegistry>>,
     id: ConnectionId,
 ) -> Result<(), StorageError> {
-    edit.close_connection(id, false); // drop watchers + temp for this connection
+    // Flush pending edits + drop watchers/temp for this connection BEFORE the
+    // backend is removed, so any save still inside the debounce window lands.
+    edit.close_connection(id, false).await;
     state.remove(id).await;
     Ok(())
 }
@@ -552,7 +554,7 @@ pub async fn close_edit_session(
     session_id: SessionId,
     keep_temp: bool,
 ) -> Result<(), StorageError> {
-    edit.close(session_id, keep_temp);
+    edit.close(session_id, keep_temp).await;
     Ok(())
 }
 

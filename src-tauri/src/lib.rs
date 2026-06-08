@@ -50,6 +50,20 @@ pub fn run() {
             commands::resolve_conflict,
             commands::preview_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // On quit, flush any pending edits still inside the debounce window so
+            // a save the user believes succeeded is not lost (C1). Temp files are
+            // preserved for conflicted/unflushed sessions; startup re-cleans.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let edit = app
+                    .state::<std::sync::Arc<edit::EditRegistry>>()
+                    .inner()
+                    .clone();
+                tauri::async_runtime::block_on(async move {
+                    edit.flush_all().await;
+                });
+            }
+        });
 }

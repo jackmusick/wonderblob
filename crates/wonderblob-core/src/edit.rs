@@ -10,6 +10,7 @@
 use crate::error::{Result, StorageError};
 use crate::vfs::{Entry, StorageBackend};
 use std::path::Path;
+use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 
 /// Snapshot used to detect out-of-band remote changes between open and save.
@@ -112,6 +113,76 @@ pub async fn save_back(
     writer.shutdown().await.map_err(StorageError::other)?;
     let entry = backend.stat(remote_path).await?;
     Ok(RemoteStat::from_entry(&entry))
+}
+
+/// The temp file's last-modified time, if it exists. The app layer captures this
+/// right after a download or a successful save to mark the "last synced" point;
+/// a later mtime means the user has unsaved local edits (see `temp_is_pending`).
+pub fn temp_mtime(temp_path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(temp_path).and_then(|m| m.modified()).ok()
+}
+
+/// Are there local edits in `temp_path` not yet pushed to the remote? True when
+/// the temp file's mtime is newer than `last_synced` (the mtime captured at the
+/// last download/save). A missing temp file means nothing to flush (`false`); a
+/// `None` baseline means "never synced" so anything present counts as pending.
+///
+/// This is what makes a re-baseline (Discard) a no-op: after re-downloading the
+/// remote into the temp file the app records the fresh mtime as `last_synced`,
+/// so the watcher event that the re-download itself triggers sees no pending
+/// change and does **not** re-upload identical bytes.
+pub fn temp_is_pending(temp_path: &Path, last_synced: Option<SystemTime>) -> bool {
+    match (temp_mtime(temp_path), last_synced) {
+        (Some(mtime), Some(synced)) => mtime > synced,
+        (Some(_), None) => true, // present but never synced → assume pending
+        (None, _) => false,      // temp gone → nothing to flush
+    }
+}
+
+/// Outcome of a conflict-aware flush of pending local edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlushResult {
+    /// No local edits since the last sync — nothing was written to the remote.
+    NothingPending,
+    /// Local edits were uploaded; `stat` is the fresh baseline and `synced_at`
+    /// is the temp mtime of the bytes that were uploaded (record as last-synced).
+    Saved {
+        stat: RemoteStat,
+        synced_at: Option<SystemTime>,
+    },
+    /// The remote changed out-of-band; nothing was written (caller must resolve).
+    Conflict { current: RemoteStat },
+}
+
+/// Conflict-aware "save the temp file back if (and only if) it has pending edits".
+/// Pending is decided by `temp_is_pending`; when pending and the remote is
+/// unchanged vs `baseline`, the temp file is uploaded; when the remote changed,
+/// **nothing is written** and a `Conflict` is returned so the caller never
+/// silently overwrites — and never deletes a temp holding unflushed work.
+pub async fn flush_if_pending(
+    backend: &dyn StorageBackend,
+    remote_path: &str,
+    temp_path: &Path,
+    last_synced: Option<SystemTime>,
+    baseline: &RemoteStat,
+) -> Result<FlushResult> {
+    if !temp_is_pending(temp_path, last_synced) {
+        return Ok(FlushResult::NothingPending);
+    }
+    match check_conflict(backend, remote_path, baseline).await? {
+        ConflictCheck::Conflict { current } => Ok(FlushResult::Conflict { current }),
+        ConflictCheck::Clear => {
+            // Capture the mtime of the bytes we're about to upload BEFORE the
+            // write, so a concurrent newer edit stays "pending" rather than being
+            // masked by a last_synced that ran ahead of the bytes we actually sent.
+            let synced_at = temp_mtime(temp_path);
+            let fresh = save_back(backend, temp_path, remote_path).await?;
+            Ok(FlushResult::Saved {
+                stat: fresh,
+                synced_at,
+            })
+        }
+    }
 }
 
 /// Default ceiling for in-app preview; over this we offer "open in editor".
@@ -332,5 +403,90 @@ mod tests {
         );
         // unknown size → allowed (the command still caps the actual read)
         assert_eq!(preview_plan("x.txt", None, cap), PreviewPlan::Text);
+    }
+
+    // Force a strictly-newer mtime than `marker` regardless of fs timestamp
+    // granularity, so "pending" is deterministic on coarse-resolution systems.
+    fn write_newer(path: &Path, bytes: &[u8], marker: Option<SystemTime>) {
+        loop {
+            std::fs::write(path, bytes).unwrap();
+            let now = temp_mtime(path);
+            match (now, marker) {
+                (Some(n), Some(m)) if n > m => break,
+                (Some(_), None) => break,
+                _ => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_uploads_when_temp_has_pending_edit() {
+        let b = MockBackend::new();
+        b.put("/r.txt", b"original".to_vec()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("r.txt");
+        let baseline = download_to_temp(&b, "/r.txt", &temp).await.unwrap();
+        let synced = temp_mtime(&temp);
+
+        // user edits locally → temp now newer than the synced marker
+        write_newer(&temp, b"edited locally!", synced);
+
+        let res = flush_if_pending(&b, "/r.txt", &temp, synced, &baseline)
+            .await
+            .unwrap();
+        match res {
+            FlushResult::Saved { .. } => {}
+            other => panic!("expected Saved, got {other:?}"),
+        }
+        assert_eq!(b.get("/r.txt").await.unwrap(), b"edited locally!");
+    }
+
+    #[tokio::test]
+    async fn flush_conflict_does_not_overwrite_and_keeps_local_bytes() {
+        let b = MockBackend::new();
+        b.put("/r.txt", b"v1".to_vec()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("r.txt");
+        let baseline = download_to_temp(&b, "/r.txt", &temp).await.unwrap();
+        let synced = temp_mtime(&temp);
+
+        // someone else changes the remote out-of-band (different size)…
+        b.put("/r.txt", b"v2 changed elsewhere".to_vec()).await;
+        // …and the user has unsaved local edits.
+        write_newer(&temp, b"my local edit", synced);
+
+        let res = flush_if_pending(&b, "/r.txt", &temp, synced, &baseline)
+            .await
+            .unwrap();
+        assert!(
+            matches!(res, FlushResult::Conflict { .. }),
+            "expected Conflict, got {res:?}"
+        );
+        // remote untouched (no silent overwrite) and the local edit is preserved.
+        assert_eq!(b.get("/r.txt").await.unwrap(), b"v2 changed elsewhere");
+        assert_eq!(std::fs::read(&temp).unwrap(), b"my local edit");
+    }
+
+    #[tokio::test]
+    async fn discard_rebaseline_then_flush_is_a_noop_with_zero_remote_writes() {
+        // Reproduces I2: after a Discard re-download, the watcher-triggered flush
+        // must NOT re-upload identical bytes. NothingPending ⇒ save_back never ran.
+        let b = MockBackend::new();
+        b.put("/r.txt", b"remote v1".to_vec()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("r.txt");
+        download_to_temp(&b, "/r.txt", &temp).await.unwrap();
+
+        // user edits locally…
+        write_newer(&temp, b"local junk", temp_mtime(&temp));
+        // …then Discards: re-download the remote and re-record last_synced.
+        let rebaselined = download_to_temp(&b, "/r.txt", &temp).await.unwrap();
+        let synced_after_discard = temp_mtime(&temp);
+
+        let res = flush_if_pending(&b, "/r.txt", &temp, synced_after_discard, &rebaselined)
+            .await
+            .unwrap();
+        assert_eq!(res, FlushResult::NothingPending);
+        assert_eq!(b.get("/r.txt").await.unwrap(), b"remote v1"); // unchanged
     }
 }

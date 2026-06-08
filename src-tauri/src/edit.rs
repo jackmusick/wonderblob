@@ -9,10 +9,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
-use wonderblob_core::edit::{check_conflict, save_back, ConflictCheck, RemoteStat};
+use wonderblob_core::edit::{
+    download_to_temp, flush_if_pending, save_back, temp_mtime, FlushResult, RemoteStat,
+};
 use wonderblob_core::error::StorageError;
 
 pub type SessionId = u64;
@@ -24,6 +26,14 @@ pub(crate) fn debounce_ready(last_event: Instant, now: Instant, window: Duration
     now.duration_since(last_event) >= window
 }
 
+/// Result of a save attempt, used by teardown to decide whether the temp file is
+/// safe to delete. `Dirty` ⇒ unflushed/conflicted work; preserve the temp file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveOutcome {
+    Clean,
+    Dirty,
+}
+
 /// One open-for-edit file. The watcher handle and the debounce task handle are
 /// held so they live as long as the session and are torn down on close.
 pub struct EditSession {
@@ -33,6 +43,10 @@ pub struct EditSession {
     pub name: String,
     pub temp_path: PathBuf,
     pub baseline: Mutex<RemoteStat>,
+    /// Temp-file mtime as of the last point the temp content matched the remote
+    /// (after download or a successful save). A newer temp mtime ⇒ pending edits.
+    /// Used to flush before teardown (C1) and to make Discard a no-op (I2).
+    pub last_synced: Mutex<Option<SystemTime>>,
     pub has_conflict: std::sync::atomic::AtomicBool,
     _watcher: RecommendedWatcher,
     task: tauri::async_runtime::JoinHandle<()>,
@@ -160,6 +174,9 @@ impl EditRegistry {
             })
         };
 
+        // The temp file was just written by the caller's download, so its current
+        // mtime is the "in sync with remote" marker.
+        let last_synced = temp_mtime(&temp_path);
         let session = Arc::new(EditSession {
             session_id,
             connection_id,
@@ -167,6 +184,7 @@ impl EditRegistry {
             name,
             temp_path,
             baseline: Mutex::new(baseline),
+            last_synced: Mutex::new(last_synced),
             has_conflict: std::sync::atomic::AtomicBool::new(false),
             _watcher: watcher,
             task,
@@ -195,34 +213,56 @@ impl EditRegistry {
                     }
                 }
             }
-            self.try_save(id).await;
+            let Some(session) = self.get(id) else { return };
+            self.attempt_save(&session).await;
         }
     }
 
-    /// Conflict-check, then upload (or emit a conflict). Errors emit `edit://error`.
-    async fn try_save(&self, id: SessionId) {
-        let Some(session) = self.get(id) else { return };
+    /// Conflict-aware save of any pending local edits, emitting the matching
+    /// `edit://*` event. Shared by the debounce loop and by teardown flush, so the
+    /// "check conflict before every save-back" guarantee holds on both paths.
+    ///
+    /// `Clean` means the temp file is safe to delete (nothing pending, or it was
+    /// uploaded). `Dirty` means there is unflushed work (conflict, upload error,
+    /// or connection gone) and the temp file MUST be preserved.
+    async fn attempt_save(&self, session: &EditSession) -> SaveOutcome {
         let Some(backend) = self.conns.read().await.get(&session.connection_id).cloned() else {
-            self.emit_error(&session, "connection closed; reconnect and re-open to save");
-            return;
+            // Only surface an error if there is actually something to lose.
+            let last_synced = *session.last_synced.lock().unwrap();
+            if wonderblob_core::edit::temp_is_pending(&session.temp_path, last_synced) {
+                self.emit_error(session, "connection closed; reconnect and re-open to save");
+                return SaveOutcome::Dirty;
+            }
+            return SaveOutcome::Clean;
         };
         let baseline = *session.baseline.lock().unwrap();
-        match check_conflict(backend.as_ref(), &session.remote_path, &baseline).await {
-            Ok(ConflictCheck::Conflict { .. }) => {
+        let last_synced = *session.last_synced.lock().unwrap();
+        match flush_if_pending(
+            backend.as_ref(),
+            &session.remote_path,
+            &session.temp_path,
+            last_synced,
+            &baseline,
+        )
+        .await
+        {
+            Ok(FlushResult::NothingPending) => SaveOutcome::Clean,
+            Ok(FlushResult::Saved { stat, synced_at }) => {
+                *session.baseline.lock().unwrap() = stat;
+                *session.last_synced.lock().unwrap() = synced_at;
+                session.has_conflict.store(false, Ordering::SeqCst);
+                let _ = self.app.emit("edit://saved", session.info());
+                SaveOutcome::Clean
+            }
+            Ok(FlushResult::Conflict { .. }) => {
                 session.has_conflict.store(true, Ordering::SeqCst);
                 let _ = self.app.emit("edit://conflict", session.info());
+                SaveOutcome::Dirty
             }
-            Ok(ConflictCheck::Clear) => {
-                match save_back(backend.as_ref(), &session.temp_path, &session.remote_path).await {
-                    Ok(fresh) => {
-                        *session.baseline.lock().unwrap() = fresh;
-                        session.has_conflict.store(false, Ordering::SeqCst);
-                        let _ = self.app.emit("edit://saved", session.info());
-                    }
-                    Err(e) => self.emit_error(&session, &e.to_string()),
-                }
+            Err(e) => {
+                self.emit_error(session, &e.to_string());
+                SaveOutcome::Dirty
             }
-            Err(e) => self.emit_error(&session, &e.to_string()),
         }
     }
 
@@ -260,15 +300,21 @@ impl EditRegistry {
             .ok_or_else(|| StorageError::Other {
                 detail: "connection closed".into(),
             })?;
+        // Capture the mtime of the bytes we're about to upload, so a concurrent
+        // newer edit stays pending rather than being masked.
+        let synced_at = temp_mtime(&session.temp_path);
         let fresh = save_back(backend.as_ref(), &session.temp_path, &session.remote_path).await?;
         *session.baseline.lock().unwrap() = fresh;
+        *session.last_synced.lock().unwrap() = synced_at;
         session.has_conflict.store(false, Ordering::SeqCst);
         let _ = self.app.emit("edit://saved", session.info());
         Ok(())
     }
 
     /// Re-download the remote into the temp file, discarding local edits, and
-    /// re-baseline (conflict "Discard").
+    /// re-baseline (conflict "Discard"). Records the fresh temp mtime as the
+    /// new last-synced point so the watcher event this re-download triggers is
+    /// seen as "nothing pending" and does NOT re-upload identical bytes (I2).
     pub async fn discard_local(&self, id: SessionId) -> Result<(), StorageError> {
         let Some(session) = self.get(id) else {
             return Ok(());
@@ -282,34 +328,42 @@ impl EditRegistry {
             .ok_or_else(|| StorageError::Other {
                 detail: "connection closed".into(),
             })?;
-        let fresh = wonderblob_core::edit::download_to_temp(
-            backend.as_ref(),
-            &session.remote_path,
-            &session.temp_path,
-        )
-        .await?;
+        let fresh =
+            download_to_temp(backend.as_ref(), &session.remote_path, &session.temp_path).await?;
         *session.baseline.lock().unwrap() = fresh;
+        *session.last_synced.lock().unwrap() = temp_mtime(&session.temp_path);
         session.has_conflict.store(false, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Close a session: drop the watcher + task; optionally delete the temp file.
-    pub fn close(&self, id: SessionId, keep_temp: bool) {
-        if let Some(session) = self.sessions.lock().unwrap().remove(&id) {
-            session.task.abort();
-            if !keep_temp {
-                let _ = std::fs::remove_file(&session.temp_path);
-                if let Some(parent) = session.temp_path.parent() {
-                    let _ = std::fs::remove_dir(parent); // best-effort; only if empty
-                }
+    /// Flush a still-registered session, then drop its watcher + task; the temp
+    /// file is deleted ONLY when `keep_temp` is false AND the flush was clean (no
+    /// pending edits, conflict, or error). A dirty/conflicted temp is preserved
+    /// regardless so nothing the user saved is silently lost (C1). Returns
+    /// whether the session ended clean (used by `close_connection`).
+    pub async fn close(&self, id: SessionId, keep_temp: bool) -> bool {
+        // Pull the session out of the map first so no new debounce save can race;
+        // abort the loop, then flush inline — the flush re-checks pending and does
+        // the full conflict-aware save, so an aborted in-flight save is recovered.
+        let Some(session) = self.sessions.lock().unwrap().remove(&id) else {
+            return true;
+        };
+        session.task.abort();
+        let clean = matches!(self.attempt_save(&session).await, SaveOutcome::Clean);
+        if clean && !keep_temp {
+            let _ = std::fs::remove_file(&session.temp_path);
+            if let Some(parent) = session.temp_path.parent() {
+                let _ = std::fs::remove_dir(parent); // best-effort; only if empty
             }
-            // Dropping `session` drops the watcher.
         }
+        // Dropping `session` drops the watcher.
+        clean
     }
 
-    /// Close every session for a connection and remove its temp tree (spec:
-    /// "temp files cleaned up on disconnect"). `keep_temp` honored per call site.
-    pub fn close_connection(&self, connection_id: ConnectionId, keep_temp: bool) {
+    /// Close every session for a connection, flushing pending edits first (C1).
+    /// The connection temp tree is removed only when `keep_temp` is false and
+    /// every session flushed clean; a conflicted/unflushed temp is kept.
+    pub async fn close_connection(&self, connection_id: ConnectionId, keep_temp: bool) {
         let ids: Vec<_> = self
             .sessions
             .lock()
@@ -318,12 +372,29 @@ impl EditRegistry {
             .filter(|s| s.connection_id == connection_id)
             .map(|s| s.session_id)
             .collect();
+        let mut all_clean = true;
         for id in ids {
-            self.close(id, keep_temp);
+            all_clean &= self.close(id, keep_temp).await;
         }
-        if !keep_temp {
+        // Only nuke the whole connection tree when nothing was left dirty —
+        // otherwise we'd delete a temp `close` deliberately preserved.
+        if !keep_temp && all_clean {
             let _ = std::fs::remove_dir_all(self.root.join(connection_id.to_string()));
         }
+    }
+
+    /// Flush pending edits for EVERY open session (app exit). Saves clean pending
+    /// work to the remote and emits `edit://conflict` for sessions the remote
+    /// changed under; never deletes temps. Returns true if every session flushed
+    /// clean (no unresolved/unflushed work remains).
+    pub async fn flush_all(&self) -> bool {
+        let sessions: Vec<Arc<EditSession>> =
+            self.sessions.lock().unwrap().values().cloned().collect();
+        let mut all_clean = true;
+        for session in sessions {
+            all_clean &= matches!(self.attempt_save(&session).await, SaveOutcome::Clean);
+        }
+        all_clean
     }
 }
 
