@@ -3,6 +3,10 @@
 //! injects a `BackendResolver` and an `EventSink`.
 
 pub mod engine;
+/// In-memory, deterministic, failure-injectable `StorageBackend` used to drive
+/// the engine from integration tests (in `tests/`, which compile against the
+/// crate externally and so cannot see `#[cfg(test)]` items).
+pub mod mock;
 pub mod model;
 pub mod store;
 
