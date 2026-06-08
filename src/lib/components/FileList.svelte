@@ -4,11 +4,90 @@
   import { formatMtime, formatSize } from "../format";
   import { activeConnection, currentPath } from "../stores/session";
   import { editPaths } from "../stores/edit";
+  import Icon from "./Icon.svelte";
+  import ContextMenu, { type MenuItem } from "./ContextMenu.svelte";
 
   let {
     onerror,
     onpreview,
-  }: { onerror?: (message: string) => void; onpreview?: (entry: Entry) => void } = $props();
+    // Parent-owned actions surfaced in the right-click menu. They act on the
+    // current selection, and a right-click selects the row first, so no entry
+    // argument is needed. Download = straight to ~/Downloads; DownloadAs = save
+    // dialog (mirrors the toolbar).
+    onDownload,
+    onDownloadAs,
+    onShare,
+    onNewFolder,
+    onUpload,
+  }: {
+    onerror?: (message: string) => void;
+    onpreview?: (entry: Entry) => void;
+    onDownload?: () => void;
+    onDownloadAs?: () => void;
+    onShare?: () => void;
+    onNewFolder?: () => void;
+    onUpload?: () => void;
+  } = $props();
+
+  // Right-click menu (row actions, or empty-area New Folder / Upload).
+  let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+
+  const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "heic", "avif", "tiff"]);
+  const CODE_EXT = new Set(["js", "ts", "jsx", "tsx", "rs", "py", "go", "rb", "java", "kt", "c", "cc", "cpp", "h", "hpp", "cs", "php", "swift", "sh", "bash", "zsh", "html", "css", "scss", "json", "yaml", "yml", "toml", "xml", "sql", "lua", "vue", "svelte"]);
+  const ARCHIVE_EXT = new Set(["zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "zst", "lz", "lzma"]);
+  const TEXT_EXT = new Set(["txt", "md", "markdown", "rtf", "log", "csv", "tsv", "ini", "cfg", "conf", "env"]);
+
+  function iconForEntry(e: Entry): string {
+    if (e.kind === "dir") return "folder";
+    const ext = e.name.includes(".") ? e.name.toLowerCase().split(".").pop()! : "";
+    if (IMAGE_EXT.has(ext)) return "file-image";
+    if (CODE_EXT.has(ext)) return "file-code";
+    if (ARCHIVE_EXT.has(ext)) return "file-archive";
+    if (ext === "pdf") return "file-pdf";
+    if (TEXT_EXT.has(ext)) return "file-text";
+    return "file";
+  }
+
+  function rowMenuItems(entry: Entry): MenuItem[] {
+    const canPresign = $activeConnection?.capabilities.canPresign ?? false;
+    const items: MenuItem[] = [
+      { label: "Open", icon: entry.kind === "dir" ? "folder" : "pencil", action: () => open(entry) },
+    ];
+    if (entry.kind !== "dir") {
+      items.push(
+        { label: "Download", icon: "download", action: () => onDownload?.() },
+        { label: "Download As…", icon: "download", action: () => onDownloadAs?.() },
+      );
+      if (canPresign) items.push({ label: "Share Link", icon: "share", action: () => onShare?.() });
+    }
+    items.push(
+      { separator: true },
+      { label: "Rename", icon: "pencil", action: () => startRename(entry) },
+      { label: "Delete", icon: "trash", danger: true, action: () => doDelete(entry) },
+    );
+    return items;
+  }
+
+  function openRowMenu(e: MouseEvent, i: number, entry: Entry) {
+    e.preventDefault();
+    e.stopPropagation();
+    selectedIndex = i;
+    cancelConfirm();
+    containerEl?.focus();
+    menu = { x: e.clientX, y: e.clientY, items: rowMenuItems(entry) };
+  }
+
+  function openEmptyMenu(e: MouseEvent) {
+    e.preventDefault();
+    menu = {
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        { label: "New Folder", icon: "folder-plus", action: () => onNewFolder?.() },
+        { label: "Upload…", icon: "upload", action: () => onUpload?.() },
+      ],
+    };
+  }
 
   // Transient "Opening…" hint while an EditSession download is in flight.
   let opening = $state(false);
@@ -266,6 +345,7 @@
   aria-label="Files"
   tabindex="0"
   onkeydown={onkeydown}
+  oncontextmenu={openEmptyMenu}
 >
   <div class="header" role="presentation">
     <span class="col-name">Name{#if opening}<span class="opening">· Opening…</span>{/if}</span>
@@ -300,11 +380,12 @@
           containerEl?.focus();
         }}
         ondblclick={() => { open(entry); containerEl?.focus(); }}
+        oncontextmenu={(e) => openRowMenu(e, i, entry)}
         onkeydown={() => {}}
       >
         <span class="col-name">
           <span class="glyph" class:dir={entry.kind === "dir"} aria-hidden="true">
-            {entry.kind === "dir" ? "▸" : entry.kind === "symlink" ? "↪" : "▢"}
+            <Icon name={iconForEntry(entry)} size={16} />
           </span>
           {#if renamingPath === entry.path}
             <input
@@ -331,6 +412,10 @@
     {/each}
   {/if}
 </div>
+
+{#if menu}
+  <ContextMenu x={menu.x} y={menu.y} items={menu.items} onclose={() => (menu = null)} />
+{/if}
 
 <style>
   .filelist {
@@ -386,10 +471,10 @@
   }
   .glyph {
     flex-shrink: 0;
-    width: 14px;
-    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     color: var(--fg-secondary);
-    font-size: var(--text-small);
   }
   .glyph.dir {
     color: var(--accent);

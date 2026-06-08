@@ -289,6 +289,11 @@
           bind:this={fileList}
           onerror={showToast}
           onpreview={(e) => (previewEntry = e)}
+          onDownload={downloadToDownloads}
+          onDownloadAs={download}
+          onShare={shareSelected}
+          onNewFolder={openNewFolder}
+          onUpload={upload}
         />
         {#if previewEntry && $activeConnection}
           <PreviewOverlay
