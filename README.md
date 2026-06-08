@@ -63,7 +63,9 @@ first launch:
 - **Drag out** — there is no deferred OS drag-out yet (incl. macOS file-promise
   drags — deferred). The fallback is the toolbar **To Downloads** button, which
   downloads the selected file straight to `~/Downloads` (no save dialog),
-  alongside the regular **Download** button with a save dialog.
+  alongside the regular **Download** button with a save dialog. A same-named
+  file already in `~/Downloads` is overwritten; use **Download** for a save
+  dialog if you want to choose the name.
 
 ## Host-key verification
 
