@@ -7,7 +7,9 @@
   import Breadcrumb from "$lib/components/Breadcrumb.svelte";
   import ConnectionSheet from "$lib/components/ConnectionSheet.svelte";
   import FileList from "$lib/components/FileList.svelte";
+  import TransfersPanel from "$lib/components/TransfersPanel.svelte";
   import { activeConnection, currentPath } from "$lib/stores/session";
+  import { activeTransferCount, initTransfers, transferList } from "$lib/stores/transfers";
 
   let sheetOpen = $state(false);
   let editing = $state<Bookmark | null>(null);
@@ -18,6 +20,24 @@
   let newFolderName = $state("");
   let newFolderInput = $state<HTMLInputElement | null>(null);
   let uploading = $state(false);
+
+  let transfersOpen = $state(false);
+
+  // Start the transfers store once (reconcile + subscribe to events).
+  $effect(() => {
+    initTransfers();
+  });
+
+  // Refresh the listing when an upload completes (it may be in the current dir).
+  let seenCompleted = new Set<number>();
+  $effect(() => {
+    for (const t of $transferList) {
+      if (t.direction === "up" && t.status === "completed" && !seenCompleted.has(t.id)) {
+        seenCompleted.add(t.id);
+        fileList?.refresh();
+      }
+    }
+  });
 
   let toast = $state<string | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -60,16 +80,19 @@
   async function upload() {
     const conn = $activeConnection;
     if (!conn || uploading) return;
-    const selected = await open({ multiple: false, directory: false, title: "Upload file" });
-    if (typeof selected !== "string") return;
-    const basename = selected.replace(/\/+$/, "").split(/[\\/]/).pop();
-    if (!basename) return;
+    const selected = await open({ multiple: true, directory: false, title: "Upload files" });
+    const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+    if (paths.length === 0) return;
     uploading = true;
     try {
-      await api.uploadFile(conn.id, selected, joinPath($currentPath, basename));
-      fileList?.refresh();
+      for (const p of paths) {
+        const base = p.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+        if (!base) continue;
+        await api.enqueueUpload(conn.id, p, joinPath($currentPath, base));
+      }
+      transfersOpen = true; // reveal progress
     } catch (e) {
-      showToast(opError(e, `Couldn't upload “${basename}”`));
+      showToast(opError(e, "Couldn't start upload"));
     } finally {
       uploading = false;
     }
@@ -163,12 +186,20 @@
           {#if $activeConnection?.capabilities.canPresign}
             <button class="ghost" onclick={shareSelected}>Share Link</button>
           {/if}
+          <button class="ghost" onclick={() => (transfersOpen = !transfersOpen)}>
+            Transfers{#if $activeTransferCount > 0} ({$activeTransferCount}){/if}
+          </button>
           <button class="ghost" onclick={disconnect}>Disconnect</button>
         </div>
       </div>
       <div class="browser">
         <FileList bind:this={fileList} onerror={showToast} />
       </div>
+      {#if transfersOpen}
+        <div class="transfers">
+          <TransfersPanel onerror={showToast} onclose={() => (transfersOpen = false)} />
+        </div>
+      {/if}
       {#if toast}
         <div class="toast" role="alert">{toast}</div>
       {/if}
@@ -244,6 +275,13 @@
     outline: none;
   }
   .browser { flex: 1; overflow-y: auto; }
+  .transfers {
+    flex-shrink: 0;
+    max-height: 38%;
+    display: flex;
+    border-top: 1px solid var(--border);
+    background: var(--bg-content);
+  }
   .toast {
     flex-shrink: 0;
     padding: 6px 12px;

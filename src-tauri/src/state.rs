@@ -7,10 +7,15 @@ use wonderblob_core::vfs::StorageBackend;
 
 pub type ConnectionId = u64;
 
+/// Shared handle to the live connection map. Wrapped in `Arc` so the transfer
+/// engine's `BackendResolver` can hold a clone alongside `AppState`; both see
+/// the same `RwLock`, so connect/disconnect is visible to in-flight transfers.
+pub type ConnMap = Arc<RwLock<HashMap<ConnectionId, Arc<dyn StorageBackend>>>>;
+
 #[derive(Default)]
 pub struct AppState {
     next_id: AtomicU64,
-    pub connections: RwLock<HashMap<ConnectionId, Arc<dyn StorageBackend>>>,
+    pub connections: ConnMap,
 }
 
 impl AppState {

@@ -67,6 +67,33 @@ export interface ConnectResult {
   capabilities: Capabilities;
 }
 
+export type TransferDirection = "up" | "down";
+export type TransferStatus =
+  | "queued" | "running" | "paused" | "completed" | "failed" | "canceled";
+
+export interface Transfer {
+  id: number;
+  connectionId: number;
+  direction: TransferDirection;
+  remotePath: string;
+  localPath: string;
+  name: string;
+  totalBytes: number | null;
+  transferredBytes: number;
+  status: TransferStatus;
+  error: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+/** Payload of `transfer://progress`. */
+export interface TransferProgress {
+  id: number;
+  transferredBytes: number;
+  totalBytes: number | null;
+  bytesPerSec: number;
+}
+
 export interface S3ConnectArgs {
   accessKeyId: string;
   secretAccessKey: string;
@@ -90,10 +117,16 @@ export const api = {
     invoke<string>("share_link", { id, path, expirySecs }),
   disconnect: (id: number) => invoke<void>("disconnect", { id }),
   listDir: (id: number, path: string) => invoke<Entry[]>("list_dir", { id, path }),
-  downloadFile: (id: number, remotePath: string, localPath: string) =>
-    invoke<void>("download_file", { id, remotePath, localPath }),
-  uploadFile: (id: number, localPath: string, remotePath: string) =>
-    invoke<void>("upload_file", { id, localPath, remotePath }),
+  enqueueDownload: (id: number, remotePath: string, localPath: string, totalBytes?: number) =>
+    invoke<number>("enqueue_download", { id, remotePath, localPath, totalBytes: totalBytes ?? null }),
+  enqueueUpload: (id: number, localPath: string, remotePath: string) =>
+    invoke<number>("enqueue_upload", { id, localPath, remotePath }),
+  pauseTransfer: (transferId: number) => invoke<void>("pause_transfer", { transferId }),
+  resumeTransfer: (transferId: number, connectionId?: number) =>
+    invoke<void>("resume_transfer", { transferId, connectionId: connectionId ?? null }),
+  cancelTransfer: (transferId: number) => invoke<void>("cancel_transfer", { transferId }),
+  listTransfers: () => invoke<Transfer[]>("list_transfers"),
+  clearCompleted: () => invoke<number>("clear_completed"),
   deleteEntry: (id: number, path: string) => invoke<void>("delete_entry", { id, path }),
   renameEntry: (id: number, from: string, to: string) =>
     invoke<void>("rename_entry", { id, from, to }),

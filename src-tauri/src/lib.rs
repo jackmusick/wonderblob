@@ -3,6 +3,9 @@ mod commands;
 #[cfg(test)]
 mod fake_backend;
 mod state;
+mod transfers;
+
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -11,6 +14,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state::AppState::default())
+        .setup(|app| {
+            let conns = app.state::<state::AppState>().connections.clone();
+            let engine = transfers::init_engine(app.handle(), conns);
+            app.manage(engine);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::connect_sftp,
             commands::connect_s3,
@@ -18,8 +27,13 @@ pub fn run() {
             commands::share_link,
             commands::disconnect,
             commands::list_dir,
-            commands::download_file,
-            commands::upload_file,
+            commands::enqueue_download,
+            commands::enqueue_upload,
+            commands::pause_transfer,
+            commands::resume_transfer,
+            commands::cancel_transfer,
+            commands::list_transfers,
+            commands::clear_completed,
             commands::delete_entry,
             commands::rename_entry,
             commands::make_dir,

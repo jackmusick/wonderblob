@@ -4,11 +4,13 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Manager, State};
-use tokio::io::AsyncWriteExt;
 use wonderblob_core::azblob::{AzAuth, AzBlobBackend, AzBlobConfig};
 use wonderblob_core::error::StorageError;
 use wonderblob_core::s3::{S3Backend, S3Config};
 use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
+use wonderblob_core::transfer::engine::TransferEngine;
+use wonderblob_core::transfer::model::{Direction, Transfer, TransferId};
+use wonderblob_core::transfer::store::NewTransfer;
 use wonderblob_core::vfs::{Capabilities, Entry, StorageBackend};
 
 /// Generous ceiling so an unanswered agent prompt (e.g. 1Password approval
@@ -167,55 +169,6 @@ pub async fn list_dir(
 }
 
 #[tauri::command]
-pub async fn download_file(
-    state: State<'_, AppState>,
-    id: ConnectionId,
-    remote_path: String,
-    local_path: String,
-) -> Result<(), StorageError> {
-    let b: Arc<dyn StorageBackend> = state.get(id).await?;
-    let mut r = b.read(&remote_path, 0).await?;
-    let mut f = tokio::fs::File::create(&local_path)
-        .await
-        .map_err(StorageError::other)?;
-    let result = async {
-        tokio::io::copy(&mut r, &mut f)
-            .await
-            .map_err(StorageError::other)?;
-        f.flush().await.map_err(StorageError::other)?;
-        Ok(())
-    }
-    .await;
-    if result.is_err() {
-        // Best-effort: don't leave a truncated partial file behind.
-        drop(f); // close the handle first (required on Windows)
-        let _ = tokio::fs::remove_file(&local_path).await;
-    }
-    result
-}
-
-#[tauri::command]
-pub async fn upload_file(
-    state: State<'_, AppState>,
-    id: ConnectionId,
-    local_path: String,
-    remote_path: String,
-) -> Result<(), StorageError> {
-    let b: Arc<dyn StorageBackend> = state.get(id).await?;
-    let mut f = tokio::fs::File::open(&local_path)
-        .await
-        .map_err(StorageError::other)?;
-    let mut w = b.write(&remote_path).await?;
-    // FIXME(v1): remote partial file is left behind; TransferEngine (Plan 3)
-    // replaces this whole path with resumable chunked uploads + cleanup.
-    tokio::io::copy(&mut f, &mut w)
-        .await
-        .map_err(StorageError::other)?;
-    w.shutdown().await.map_err(StorageError::other)?;
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn delete_entry(
     state: State<'_, AppState>,
     id: ConnectionId,
@@ -251,6 +204,108 @@ pub async fn share_link(
     expiry_secs: u64,
 ) -> Result<String, StorageError> {
     state.get(id).await?.share_link(&path, expiry_secs).await
+}
+
+// ---------------------------------------------------------------------------
+// Transfers (queued, persistent, resumable — see wonderblob_core::transfer)
+// ---------------------------------------------------------------------------
+
+/// Last path component, tolerant of trailing slashes and either separator.
+fn basename_of(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_string()
+}
+
+#[tauri::command]
+pub async fn enqueue_download(
+    state: State<'_, AppState>,
+    engine: State<'_, Arc<TransferEngine>>,
+    id: ConnectionId,
+    remote_path: String,
+    local_path: String,
+    total_bytes: Option<u64>,
+) -> Result<TransferId, StorageError> {
+    // Use the caller-supplied size, else stat the remote for the progress bar,
+    // else leave it indeterminate.
+    let total = match total_bytes {
+        Some(b) => Some(b),
+        None => match state.get(id).await {
+            Ok(b) => b.stat(&remote_path).await.ok().and_then(|e| e.size),
+            Err(_) => None,
+        },
+    };
+    engine
+        .enqueue(NewTransfer {
+            connection_id: id,
+            direction: Direction::Down,
+            name: basename_of(&remote_path),
+            remote_path,
+            local_path,
+            total_bytes: total,
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn enqueue_upload(
+    engine: State<'_, Arc<TransferEngine>>,
+    id: ConnectionId,
+    local_path: String,
+    remote_path: String,
+) -> Result<TransferId, StorageError> {
+    let total = tokio::fs::metadata(&local_path).await.ok().map(|m| m.len());
+    engine
+        .enqueue(NewTransfer {
+            connection_id: id,
+            direction: Direction::Up,
+            name: basename_of(&local_path),
+            remote_path,
+            local_path,
+            total_bytes: total,
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn pause_transfer(
+    engine: State<'_, Arc<TransferEngine>>,
+    transfer_id: TransferId,
+) -> Result<(), StorageError> {
+    engine.pause(transfer_id).await
+}
+
+#[tauri::command]
+pub async fn resume_transfer(
+    engine: State<'_, Arc<TransferEngine>>,
+    transfer_id: TransferId,
+    connection_id: Option<u64>,
+) -> Result<(), StorageError> {
+    engine.resume_with(transfer_id, connection_id).await
+}
+
+#[tauri::command]
+pub async fn cancel_transfer(
+    engine: State<'_, Arc<TransferEngine>>,
+    transfer_id: TransferId,
+) -> Result<(), StorageError> {
+    engine.cancel(transfer_id).await
+}
+
+#[tauri::command]
+pub async fn list_transfers(
+    engine: State<'_, Arc<TransferEngine>>,
+) -> Result<Vec<Transfer>, StorageError> {
+    engine.list()
+}
+
+#[tauri::command]
+pub async fn clear_completed(
+    engine: State<'_, Arc<TransferEngine>>,
+) -> Result<usize, StorageError> {
+    engine.clear_completed()
 }
 
 // ---------------------------------------------------------------------------
