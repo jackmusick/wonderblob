@@ -1,10 +1,12 @@
 use crate::bookmarks::{secrets, AzAuthKind, Bookmark, BookmarkStore};
+use crate::edit::{EditRegistry, EditSessionInfo, SessionId};
 use crate::state::{AppState, ConnectionId};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Manager, State};
 use wonderblob_core::azblob::{AzAuth, AzBlobBackend, AzBlobConfig};
+use wonderblob_core::edit::{image_mime, preview_plan, PreviewPlan, PREVIEW_CAP_BYTES};
 use wonderblob_core::error::StorageError;
 use wonderblob_core::s3::{S3Backend, S3Config};
 use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
@@ -154,7 +156,14 @@ pub async fn connect_azblob(
 }
 
 #[tauri::command]
-pub async fn disconnect(state: State<'_, AppState>, id: ConnectionId) -> Result<(), StorageError> {
+pub async fn disconnect(
+    state: State<'_, AppState>,
+    edit: State<'_, Arc<EditRegistry>>,
+    id: ConnectionId,
+) -> Result<(), StorageError> {
+    // Flush pending edits + drop watchers/temp for this connection BEFORE the
+    // backend is removed, so any save still inside the debounce window lands.
+    edit.close_connection(id, false).await;
     state.remove(id).await;
     Ok(())
 }
@@ -497,4 +506,180 @@ pub async fn connect_bookmark(
         }
     };
     Ok(register(&state, backend).await)
+}
+
+// ---------------------------------------------------------------------------
+// EditSession (open / edit / save-back — see crate::edit + wonderblob_core::edit)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn open_in_editor(
+    state: State<'_, AppState>,
+    edit: State<'_, Arc<EditRegistry>>,
+    app: tauri::AppHandle,
+    id: ConnectionId,
+    path: String,
+) -> Result<SessionId, StorageError> {
+    use tauri_plugin_opener::OpenerExt;
+    // Re-open the existing session if the file is already open.
+    if let Some(existing) = edit.find(id, &path) {
+        if let Some(s) = edit.get(existing) {
+            app.opener()
+                .open_path(s.temp_path.to_string_lossy(), None::<&str>)
+                .map_err(StorageError::other)?;
+        }
+        return Ok(existing);
+    }
+    let backend = state.get(id).await?;
+    let temp = edit.temp_path_for(id, &path);
+    let baseline = wonderblob_core::edit::download_to_temp(backend.as_ref(), &path, &temp).await?;
+    let name = basename_of(&path);
+    let session_id = edit.register(id, path, name, temp.clone(), baseline)?;
+    app.opener()
+        .open_path(temp.to_string_lossy(), None::<&str>)
+        .map_err(StorageError::other)?;
+    Ok(session_id)
+}
+
+#[tauri::command]
+pub async fn list_edit_sessions(
+    edit: State<'_, Arc<EditRegistry>>,
+) -> Result<Vec<EditSessionInfo>, StorageError> {
+    Ok(edit.list())
+}
+
+#[tauri::command]
+pub async fn close_edit_session(
+    edit: State<'_, Arc<EditRegistry>>,
+    session_id: SessionId,
+    keep_temp: bool,
+) -> Result<(), StorageError> {
+    edit.close(session_id, keep_temp).await;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictAction {
+    Overwrite,
+    SaveAsCopy,
+    Discard,
+}
+
+#[tauri::command]
+pub async fn resolve_conflict(
+    state: State<'_, AppState>,
+    edit: State<'_, Arc<EditRegistry>>,
+    session_id: SessionId,
+    action: ConflictAction,
+) -> Result<(), StorageError> {
+    match action {
+        ConflictAction::Overwrite => edit.force_save(session_id).await,
+        ConflictAction::Discard => edit.discard_local(session_id).await,
+        ConflictAction::SaveAsCopy => {
+            // Upload the local edits to a sibling "<name> (local copy)" path,
+            // leaving the (changed) remote untouched; then clear the conflict.
+            let session = edit.get(session_id).ok_or_else(|| StorageError::Other {
+                detail: "no such edit session".into(),
+            })?;
+            let backend = state.get(session.connection_id).await?;
+            let copy_path = sibling_copy_path(&session.remote_path);
+            wonderblob_core::edit::save_back(backend.as_ref(), &session.temp_path, &copy_path)
+                .await?;
+            edit.discard_local(session_id).await // re-baseline to the real remote
+        }
+    }
+}
+
+/// "/a/b/report.txt" → "/a/b/report (local copy).txt".
+fn sibling_copy_path(remote_path: &str) -> String {
+    let (dir, file) = match remote_path.rfind('/') {
+        Some(i) => (&remote_path[..=i], &remote_path[i + 1..]),
+        None => ("", remote_path),
+    };
+    match file.rfind('.') {
+        Some(i) if i > 0 => format!("{dir}{} (local copy){}", &file[..i], &file[i..]),
+        _ => format!("{dir}{file} (local copy)"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-app preview (capped read → text decode or image data URL)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewResult {
+    /// Tagged plan: { kind: "text" | "image" | "pdf" | "tooLarge" | "unsupported", … }
+    pub plan: PreviewPlan,
+    /// Decoded UTF-8 for `text` previews.
+    pub text: Option<String>,
+    /// "data:<mime>;base64,…" for `image` previews.
+    pub data_url: Option<String>,
+}
+
+/// Read up to PREVIEW_CAP_BYTES of a remote file for the in-app preview.
+#[tauri::command]
+pub async fn preview_file(
+    state: State<'_, AppState>,
+    id: ConnectionId,
+    path: String,
+    name: String,
+    size: Option<u64>,
+) -> Result<PreviewResult, StorageError> {
+    use base64::Engine;
+    use tokio::io::AsyncReadExt;
+
+    let plan = preview_plan(&name, size, PREVIEW_CAP_BYTES);
+    // Only the renderable kinds read bytes; the rest report and stop.
+    match &plan {
+        PreviewPlan::Text | PreviewPlan::Image => {}
+        _ => {
+            return Ok(PreviewResult {
+                plan,
+                text: None,
+                data_url: None,
+            })
+        }
+    }
+    let backend = state.get(id).await?;
+    let mut reader = backend.read(&path, 0).await?;
+    // Read cap+1 so we can detect (and reject) files whose real size exceeded the
+    // declared `size` (or had no declared size).
+    let mut buf = Vec::new();
+    let mut limited = (&mut reader).take(PREVIEW_CAP_BYTES + 1);
+    limited
+        .read_to_end(&mut buf)
+        .await
+        .map_err(StorageError::other)?;
+    if buf.len() as u64 > PREVIEW_CAP_BYTES {
+        return Ok(PreviewResult {
+            plan: PreviewPlan::TooLarge {
+                size: buf.len() as u64,
+                cap: PREVIEW_CAP_BYTES,
+            },
+            text: None,
+            data_url: None,
+        });
+    }
+    Ok(match plan {
+        PreviewPlan::Text => PreviewResult {
+            plan: PreviewPlan::Text,
+            text: Some(String::from_utf8_lossy(&buf).into_owned()),
+            data_url: None,
+        },
+        PreviewPlan::Image => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+            PreviewResult {
+                plan: PreviewPlan::Image,
+                text: None,
+                data_url: Some(format!("data:{};base64,{}", image_mime(&name), b64)),
+            }
+        }
+        other => PreviewResult {
+            plan: other,
+            text: None,
+            data_url: None,
+        },
+    })
 }

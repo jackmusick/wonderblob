@@ -1,5 +1,6 @@
 mod bookmarks;
 mod commands;
+mod edit;
 #[cfg(test)]
 mod fake_backend;
 mod state;
@@ -16,8 +17,10 @@ pub fn run() {
         .manage(state::AppState::default())
         .setup(|app| {
             let conns = app.state::<state::AppState>().connections.clone();
-            let engine = transfers::init_engine(app.handle(), conns);
+            let engine = transfers::init_engine(app.handle(), conns.clone());
             app.manage(engine);
+            let edit = edit::init_edit(app.handle(), conns);
+            app.manage(edit);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -41,7 +44,26 @@ pub fn run() {
             commands::bookmark_save,
             commands::bookmark_delete,
             commands::connect_bookmark,
+            commands::open_in_editor,
+            commands::list_edit_sessions,
+            commands::close_edit_session,
+            commands::resolve_conflict,
+            commands::preview_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // On quit, flush any pending edits still inside the debounce window so
+            // a save the user believes succeeded is not lost (C1). Temp files are
+            // preserved for conflicted/unflushed sessions; startup re-cleans.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let edit = app
+                    .state::<std::sync::Arc<edit::EditRegistry>>()
+                    .inner()
+                    .clone();
+                tauri::async_runtime::block_on(async move {
+                    edit.flush_all().await;
+                });
+            }
+        });
 }

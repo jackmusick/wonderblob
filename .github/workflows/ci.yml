@@ -32,6 +32,7 @@ jobs:
           ./scripts/test-sftp-up.sh
           WONDERBLOB_TEST_SFTP=1 cargo test -p wonderblob-core --test sftp_contract
           WONDERBLOB_TEST_SFTP=1 cargo test -p wonderblob-core --test transfer_sftp
+          WONDERBLOB_TEST_SFTP=1 cargo test -p wonderblob-core --test edit_sftp
           ./scripts/test-sftp-down.sh
 
       - name: SFTP agent + key-file auth tests

@@ -1,15 +1,21 @@
 <script lang="ts">
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { open, save } from "@tauri-apps/plugin-dialog";
   import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-  import { api, type Bookmark } from "$lib/api";
+  import { api, type Bookmark, type Entry } from "$lib/api";
   import { describeError } from "$lib/errors";
   import BookmarkList from "$lib/components/BookmarkList.svelte";
   import Breadcrumb from "$lib/components/Breadcrumb.svelte";
+  import ConflictModal from "$lib/components/ConflictModal.svelte";
   import ConnectionSheet from "$lib/components/ConnectionSheet.svelte";
+  import EditSessions from "$lib/components/EditSessions.svelte";
   import FileList from "$lib/components/FileList.svelte";
+  import PreviewOverlay from "$lib/components/PreviewOverlay.svelte";
   import TransfersPanel from "$lib/components/TransfersPanel.svelte";
   import { activeConnection, currentPath } from "$lib/stores/session";
+  import { editConflicts, initEdit } from "$lib/stores/edit";
   import { activeTransferCount, initTransfers, transferList } from "$lib/stores/transfers";
+
+  let previewEntry = $state<Entry | null>(null);
 
   let sheetOpen = $state(false);
   let editing = $state<Bookmark | null>(null);
@@ -26,6 +32,14 @@
   // Start the transfers store once (reconcile + subscribe to events).
   $effect(() => {
     initTransfers();
+  });
+
+  // Start the edit store once (reconcile + subscribe to edit:// events).
+  $effect(() => {
+    initEdit({
+      onSaved: (name) => showToast(`Saved “${name}”`),
+      onError: showToast,
+    });
   });
 
   // Refresh the listing when an upload completes (it may be in the current dir).
@@ -149,6 +163,24 @@
     }
   }
 
+  async function download() {
+    const conn = $activeConnection;
+    if (!conn) return;
+    const entry = fileList?.selected() ?? null;
+    if (!entry || entry.kind === "dir") {
+      showToast("Select a file to download.");
+      return;
+    }
+    const dest = await save({ defaultPath: entry.name, title: "Download to…" });
+    if (!dest) return;
+    try {
+      await api.enqueueDownload(conn.id, entry.path, dest, entry.size ?? undefined);
+      transfersOpen = true; // reveal progress
+    } catch (e) {
+      showToast(opError(e, "Couldn't start download"));
+    }
+  }
+
   async function disconnect() {
     const conn = $activeConnection;
     if (!conn) return;
@@ -183,9 +215,11 @@
           <button class="ghost" onclick={upload} disabled={uploading}>
             {uploading ? "Uploading…" : "Upload"}
           </button>
+          <button class="ghost" onclick={download}>Download</button>
           {#if $activeConnection?.capabilities.canPresign}
             <button class="ghost" onclick={shareSelected}>Share Link</button>
           {/if}
+          <EditSessions />
           <button class="ghost" onclick={() => (transfersOpen = !transfersOpen)}>
             Transfers{#if $activeTransferCount > 0} ({$activeTransferCount}){/if}
           </button>
@@ -193,7 +227,19 @@
         </div>
       </div>
       <div class="browser">
-        <FileList bind:this={fileList} onerror={showToast} />
+        <FileList
+          bind:this={fileList}
+          onerror={showToast}
+          onpreview={(e) => (previewEntry = e)}
+        />
+        {#if previewEntry && $activeConnection}
+          <PreviewOverlay
+            entry={previewEntry}
+            connectionId={$activeConnection.id}
+            onclose={() => (previewEntry = null)}
+            onopen={(e) => fileList?.openEntry(e)}
+          />
+        {/if}
       </div>
       {#if transfersOpen}
         <div class="transfers">
@@ -217,6 +263,10 @@
 
 {#if sheetOpen}
   <ConnectionSheet bookmark={editing} onclose={closeSheet} onsaved={onSaved} />
+{/if}
+
+{#if $editConflicts.length > 0}
+  <ConflictModal session={$editConflicts[0]} />
 {/if}
 
 <style>
@@ -274,7 +324,7 @@
     border-radius: var(--radius);
     outline: none;
   }
-  .browser { flex: 1; overflow-y: auto; }
+  .browser { flex: 1; overflow-y: auto; position: relative; }
   .transfers {
     flex-shrink: 0;
     max-height: 38%;
