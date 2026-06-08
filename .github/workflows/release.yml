@@ -1,6 +1,6 @@
 name: Release
 
-# Tag-gated: pushing a `v*` tag (e.g. v0.6.0) builds installers on each native
+# Tag-gated: pushing a `v*` tag (e.g. v0.1.0) builds installers on each native
 # runner and uploads them to a DRAFT prerelease for review before publishing.
 # Builds are UNSIGNED (no notarization / code-signing) — see README for the
 # Gatekeeper / SmartScreen caveats. Do not run casually: macOS + Windows runners
@@ -66,3 +66,24 @@ jobs:
           releaseDraft: true
           prerelease: true
           args: ${{ matrix.args }}
+
+      - name: Build & attach Flatpak (Linux only)
+        if: matrix.platform == 'ubuntu-22.04'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub \
+            https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.gnome.Platform//47 org.gnome.Sdk//47
+
+          # tauri-action left the deb here; the manifest expects it as wonderblob.deb.
+          deb=$(ls src-tauri/target/release/bundle/deb/wonderblob_*_amd64.deb | head -n1)
+          cp "$deb" packaging/flatpak/wonderblob.deb
+
+          flatpak-builder --user --force-clean --repo=fp-repo \
+            fp-build packaging/flatpak/com.wonderblob.app.yml
+          flatpak build-bundle fp-repo wonderblob.flatpak com.wonderblob.app
+
+          gh release upload "${{ github.ref_name }}" wonderblob.flatpak --clobber
