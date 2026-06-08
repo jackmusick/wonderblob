@@ -1,0 +1,76 @@
+# Wonderblob — Resume Notes
+
+_Last updated: 2026-06-08. Pause point after completing all six implementation plans._
+
+## Where things stand
+
+**All six plans are implemented, reviewed, and merged to `main`. CI is green on the
+real GitHub runner.** The repo (`jackmusick/wonderblob`, private) is at a clean,
+pushed state — nothing uncommitted, no in-flight work.
+
+| Plan | Feature | Status |
+|------|---------|--------|
+| 1 | Foundation + SFTP (agent-first auth) | ✅ merged |
+| 2 | S3 + Azure Blob backends | ✅ merged |
+| 3 | TransferEngine (queue/resume/progress) | ✅ merged |
+| 4 | EditSession (open/edit/save-back, preview) | ✅ merged |
+| 5 | OneDrive for Business (Graph + OAuth) | ✅ merged |
+| 6 | Drag & drop, packaging, SSH host-key verification | ✅ merged |
+
+Design spec: `docs/superpowers/specs/2026-06-07-wonderblob-design.md`
+Per-plan plans: `docs/superpowers/plans/`
+
+## What's verified
+
+- Every plan: implement → spec review → adversarial/security review → **live GUI smoke test**.
+- SFTP, S3 (vs MinIO), Azure (vs Azurite), transfers, edit/save-back, conflict
+  detection, host-key TOFU, and the "To Downloads" fallback all verified in the GUI.
+- All backends pass a shared VFS contract suite incl. 20MB resumable transfers.
+- CI runs the full suite + Dockerized SFTP/MinIO/Azurite fixtures on every push.
+
+## What's left — NONE of it is code; all needs you
+
+1. **OneDrive live sign-in (the only thing untestable headless).**
+   - Entra app is registered: client ID `aaeb21a2-1c76-4c1d-92ab-28c6e611dcc2`,
+     redirect `wonderblob://auth`, delegated scopes Files.ReadWrite.All +
+     offline_access + User.Read, public-client flows enabled.
+   - To test: `npm run tauri dev` → New Connection → Microsoft OneDrive →
+     Sign in with Microsoft → browser consent → should deep-link back and list
+     your real OneDrive.
+   - **If it fails with `AADSTS50011` (redirect mismatch):** the `wonderblob://auth`
+     URI has no path segment, which the Entra workforce platform *usually* accepts
+     but occasionally rejects. Fix = register `wonderblob://auth/` (trailing slash)
+     or `wonderblob://auth/callback` in Entra, then update `REDIRECT_URI` in
+     `src-tauri/src/onedrive_auth.rs` to match byte-for-byte.
+
+2. **Drag-in manual check.** Drag a file/folder from Dolphin onto the browser pane
+   with a connection active — should show a drop highlight and enqueue uploads.
+   (Unit-tested + wired; couldn't be simulated under the headless test display.)
+
+3. **Cut the first release (optional, when ready).** Push a `v0.6.0` tag:
+   `git tag v0.6.0 && git push origin v0.6.0`. This triggers `.github/workflows/release.yml`
+   (macOS + Windows + Linux runners, ~uses runner minutes) and creates a **draft**
+   GitHub Release with installers (deb/rpm/AppImage/dmg/msi/nsis). Builds are
+   **unsigned** for v1 — README documents the Gatekeeper/SmartScreen workarounds.
+
+## Known post-v1 polish (non-blocking, deferred deliberately)
+
+- Recursive folder drag-in (currently top-level files + one dir level).
+- Real OS drag-OUT / macOS file-promise drags (fallback "To Downloads" ships instead).
+- Resumable UPLOAD sessions (downloads resume; uploads restart-from-0 today).
+- Code-signing / notarization.
+- `~/Downloads` name-collision overwrites on "To Downloads" (documented in README).
+- Conflict detection degrades to size-only on S3/Azure objects without mtime.
+
+## To run locally
+
+```bash
+npm install
+npm run tauri dev        # dev app (needs the vite server, which this starts)
+# Test fixtures (Docker):
+./scripts/test-sftp-up.sh      # SFTP on :2222 (wb/wbpass)
+./scripts/test-s3-up.sh        # MinIO on :9000 (minioadmin/minioadmin)
+./scripts/test-azblob-up.sh    # Azurite on :10000
+# Gated integration tests:
+WONDERBLOB_TEST_SFTP=1 cargo test -p wonderblob-core --test sftp_contract
+```
