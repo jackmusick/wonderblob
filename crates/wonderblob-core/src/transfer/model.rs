@@ -17,6 +17,7 @@ impl Direction {
             Direction::Down => "down",
         }
     }
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "up" => Some(Direction::Up),
@@ -50,6 +51,7 @@ impl TransferStatus {
             TransferStatus::Canceled => "canceled",
         }
     }
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         Some(match s {
             "queued" => TransferStatus::Queued,

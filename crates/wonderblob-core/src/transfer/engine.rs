@@ -209,7 +209,9 @@ impl TransferEngine {
                         tokio::time::sleep(Duration::from_millis(backoff)).await;
                         continue; // loop re-reads transferred_bytes → download resumes from offset
                     }
-                    let _ = self.store.set_status(id, TransferStatus::Failed, Some(&msg));
+                    let _ = self
+                        .store
+                        .set_status(id, TransferStatus::Failed, Some(&msg));
                     self.emit_state(id);
                     return;
                 }
@@ -287,7 +289,9 @@ impl TransferEngine {
         if let Err(e) = file.flush().await {
             return Outcome::Failed(e.to_string(), false);
         }
-        let _ = self.store.update_progress(t.id, transferred, Some(transferred));
+        let _ = self
+            .store
+            .update_progress(t.id, transferred, Some(transferred));
         self.sink.emit(TransferEvent::Progress(TransferUpdate {
             id: t.id,
             transferred_bytes: transferred,
@@ -318,9 +322,20 @@ impl TransferEngine {
     }
 
     /// Re-enqueue a paused/failed transfer. Downloads resume from
-    /// `transferred_bytes`; uploads reset to 0 first (see header). Optionally
-    /// rebind to a fresh connection (restart recovery — Task 9).
+    /// `transferred_bytes`; uploads reset to 0 first (see header).
     pub async fn resume(self: &Arc<Self>, id: TransferId) -> crate::error::Result<()> {
+        self.resume_with(id, None).await
+    }
+
+    /// Resume, optionally rebinding to a fresh connection id (restart recovery).
+    pub async fn resume_with(
+        self: &Arc<Self>,
+        id: TransferId,
+        connection_id: Option<u64>,
+    ) -> crate::error::Result<()> {
+        if let Some(cid) = connection_id {
+            self.store.rebind_connection(id, cid)?;
+        }
         let Some(t) = self.store.get(id)? else {
             return Ok(());
         };
@@ -329,6 +344,27 @@ impl TransferEngine {
         }
         self.clone().spawn(id);
         Ok(())
+    }
+
+    /// Call once at startup. Any non-terminal row from a prior session is parked
+    /// `Paused` (its connection is gone) so the UI can offer Resume once the
+    /// matching bookmark reconnects. Returns the count reloaded.
+    pub fn recover_on_start(&self) -> crate::error::Result<usize> {
+        let incomplete = self.store.load_incomplete()?;
+        for t in &incomplete {
+            // Anything that claimed to be running/queued at crash time is parked.
+            if t.status != TransferStatus::Paused {
+                let _ = self.store.set_status(
+                    t.id,
+                    TransferStatus::Paused,
+                    Some("interrupted by app restart; reconnect to resume"),
+                );
+            }
+            if let Some(loaded) = self.store.get(t.id)? {
+                self.sink.emit(TransferEvent::State(loaded));
+            }
+        }
+        Ok(incomplete.len())
     }
 
     /// Stop a transfer (running or not) and clean the partial download artifact.
@@ -423,7 +459,9 @@ impl TransferEngine {
             // shutdown finalizes the multipart/block upload (Plan 2) → retryable.
             return Outcome::Failed(e.to_string(), true);
         }
-        let _ = self.store.update_progress(t.id, transferred, Some(transferred));
+        let _ = self
+            .store
+            .update_progress(t.id, transferred, Some(transferred));
         self.sink.emit(TransferEvent::Progress(TransferUpdate {
             id: t.id,
             transferred_bytes: transferred,

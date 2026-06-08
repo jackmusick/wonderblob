@@ -107,10 +107,7 @@ async fn progress_is_monotonic_and_reaches_total() {
             last = u.transferred_bytes;
         }
     }
-    assert_eq!(
-        store.get(id).unwrap().unwrap().transferred_bytes,
-        500_000
-    );
+    assert_eq!(store.get(id).unwrap().unwrap().transferred_bytes, 500_000);
 }
 
 #[tokio::test]
@@ -301,4 +298,66 @@ async fn transient_download_failure_is_retried_then_succeeds() {
         .unwrap();
     settle(|| store.get(id).unwrap().unwrap().status == TransferStatus::Completed).await;
     assert_eq!(std::fs::read(&local).unwrap(), body); // resumed past the injected fault
+}
+
+#[tokio::test]
+async fn restart_loads_incomplete_and_resume_rebinds_to_finish() {
+    let body: Vec<u8> = (0..800_000u32).map(|i| (i % 251) as u8).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("transfers.db");
+    let local = dir.path().join("r.bin");
+
+    // --- session 1: enqueue, pause mid-way, "crash" (drop engine) ---
+    let id;
+    {
+        let backend = Arc::new(MockBackend::new());
+        backend.put("/r.bin", body.clone()).await;
+        backend.set_read_delay_ms(3);
+        let store = Arc::new(TransferStore::open(&db).unwrap());
+        let engine = TransferEngine::new(
+            store.clone(),
+            Arc::new(OneBackend(backend.clone())),
+            Arc::new(CollectSink::default()),
+            fast_cfg(1),
+        );
+        id = engine
+            .enqueue(NewTransfer {
+                connection_id: 1,
+                direction: Direction::Down,
+                remote_path: "/r.bin".into(),
+                local_path: local.to_string_lossy().into(),
+                name: "r.bin".into(),
+                total_bytes: Some(800_000),
+            })
+            .await
+            .unwrap();
+        settle(|| {
+            let t = store.get(id).unwrap().unwrap();
+            t.status == TransferStatus::Running && t.transferred_bytes > 0
+        })
+        .await;
+        engine.pause(id).await.unwrap();
+        settle(|| store.get(id).unwrap().unwrap().status == TransferStatus::Paused).await;
+    } // engine + store dropped
+
+    // --- session 2: reopen DB, recover, reconnect (new conn id 99), rebind+resume ---
+    let backend2 = Arc::new(MockBackend::new());
+    backend2.put("/r.bin", body.clone()).await;
+    let store2 = Arc::new(TransferStore::open(&db).unwrap());
+    let engine2 = TransferEngine::new(
+        store2.clone(),
+        Arc::new(OneBackend(backend2.clone())),
+        Arc::new(CollectSink::default()),
+        fast_cfg(1),
+    );
+    let loaded = engine2.recover_on_start().unwrap();
+    assert_eq!(loaded, 1); // the paused transfer was reloaded
+    assert_eq!(
+        store2.get(id).unwrap().unwrap().status,
+        TransferStatus::Paused
+    );
+
+    engine2.resume_with(id, Some(99)).await.unwrap(); // rebind to new connection
+    settle(|| store2.get(id).unwrap().unwrap().status == TransferStatus::Completed).await;
+    assert_eq!(std::fs::read(&local).unwrap(), body);
 }

@@ -126,7 +126,12 @@ impl TransferStore {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(map_db)
     }
 
-    pub fn update_progress(&self, id: TransferId, transferred: u64, total: Option<u64>) -> Result<()> {
+    pub fn update_progress(
+        &self,
+        id: TransferId,
+        transferred: u64,
+        total: Option<u64>,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE transfers
@@ -140,7 +145,12 @@ impl TransferStore {
         Ok(())
     }
 
-    pub fn set_status(&self, id: TransferId, status: TransferStatus, error: Option<&str>) -> Result<()> {
+    pub fn set_status(
+        &self,
+        id: TransferId,
+        status: TransferStatus,
+        error: Option<&str>,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE transfers SET status = ?2, error = ?3, updated_at_ms = ?4 WHERE id = ?1",
@@ -264,7 +274,8 @@ mod tests {
         let running = sample(&s, 1, Direction::Down);
         let done = sample(&s, 1, Direction::Down);
         let paused = sample(&s, 1, Direction::Up);
-        s.set_status(running, TransferStatus::Running, None).unwrap();
+        s.set_status(running, TransferStatus::Running, None)
+            .unwrap();
         s.set_status(done, TransferStatus::Completed, None).unwrap();
         s.set_status(paused, TransferStatus::Paused, None).unwrap();
         let mut ids: Vec<_> = s
