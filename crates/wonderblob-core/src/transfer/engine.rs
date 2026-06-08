@@ -297,6 +297,40 @@ impl TransferEngine {
         Outcome::Completed
     }
 
+    /// Signal a running transfer to stop at the next chunk boundary, preserving
+    /// its partial file + offset. No-op if it isn't currently running.
+    pub async fn pause(self: &Arc<Self>, id: TransferId) -> crate::error::Result<()> {
+        let signaled = {
+            let map = self.controls.lock().unwrap();
+            if let Some(c) = map.get(&id) {
+                c.store(C_PAUSE, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        };
+        if !signaled {
+            // Queued-but-not-started, or already parked: mark paused directly.
+            self.store.set_status(id, TransferStatus::Paused, None)?;
+            self.emit_state(id);
+        }
+        Ok(())
+    }
+
+    /// Re-enqueue a paused/failed transfer. Downloads resume from
+    /// `transferred_bytes`; uploads reset to 0 first (see header). Optionally
+    /// rebind to a fresh connection (restart recovery — Task 9).
+    pub async fn resume(self: &Arc<Self>, id: TransferId) -> crate::error::Result<()> {
+        let Some(t) = self.store.get(id)? else {
+            return Ok(());
+        };
+        if t.direction == Direction::Up {
+            self.store.reset_upload_offset(id)?;
+        }
+        self.clone().spawn(id);
+        Ok(())
+    }
+
     /// Upload streaming is implemented in Task 8.
     async fn stream_upload(
         &self,

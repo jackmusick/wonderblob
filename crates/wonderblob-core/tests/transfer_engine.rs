@@ -160,3 +160,49 @@ async fn concurrency_cap_is_respected() {
     );
     settle(|| store.get(b).unwrap().unwrap().status == TransferStatus::Completed).await;
 }
+
+#[tokio::test]
+async fn pause_keeps_partial_then_resume_completes_from_offset() {
+    let backend = Arc::new(MockBackend::new());
+    let body: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+    backend.put("/r.bin", body.clone()).await;
+    // Slow chunks so we can pause mid-file before it completes.
+    backend.set_read_delay_ms(3);
+    let store = Arc::new(TransferStore::open_in_memory().unwrap());
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("r.bin");
+    let engine = TransferEngine::new(
+        store.clone(),
+        Arc::new(OneBackend(backend.clone())),
+        Arc::new(CollectSink::default()),
+        fast_cfg(1),
+    );
+    let id = engine
+        .enqueue(NewTransfer {
+            connection_id: 1,
+            direction: Direction::Down,
+            remote_path: "/r.bin".into(),
+            local_path: local.to_string_lossy().into(),
+            name: "r.bin".into(),
+            total_bytes: Some(1_000_000),
+        })
+        .await
+        .unwrap();
+
+    // Pause once some bytes have landed but before completion.
+    settle(|| {
+        let t = store.get(id).unwrap().unwrap();
+        t.status == TransferStatus::Running && t.transferred_bytes > 0
+    })
+    .await;
+    engine.pause(id).await.unwrap();
+    settle(|| store.get(id).unwrap().unwrap().status == TransferStatus::Paused).await;
+    let partial = store.get(id).unwrap().unwrap().transferred_bytes;
+    assert!(partial > 0 && partial < 1_000_000);
+
+    // Resume → completes, byte-identical. Drop the delay so it finishes quickly.
+    backend.set_read_delay_ms(0);
+    engine.resume(id).await.unwrap();
+    settle(|| store.get(id).unwrap().unwrap().status == TransferStatus::Completed).await;
+    assert_eq!(std::fs::read(&local).unwrap(), body);
+}
