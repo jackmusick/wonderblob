@@ -12,8 +12,10 @@
 //! account key ourselves (HMAC-SHA256) and bake it into the service endpoint
 //! URL, constructing every client with `credential = None`. The SDK preserves
 //! the endpoint's query string across operations, so the SAS authorizes all
-//! requests. Share links reuse the same signer to mint a short-lived,
-//! read-only, object-scoped account SAS.
+//! requests. Share links use the same signer to mint a short-lived, read-only
+//! **service** SAS scoped to the single target blob (the blob path is part of
+//! the signature, so the link can't be edited to reach another blob).
+//! `https`-only off-emulator; `https,http` only for the Azurite emulator.
 //!
 //! ## Listing
 //! The GA SDK's `list_blobs` exposes no `delimiter` parameter, so there are no
@@ -72,25 +74,30 @@ struct SasSigner {
 }
 
 impl SasSigner {
-    /// Compute the `sig` value for an account SAS over the given fields
-    /// (string-to-sign per "Create an account SAS", version >= 2020-12-06).
-    fn sign(&self, perms: &str, srt: &str, expiry: &str) -> Result<String> {
-        let string_to_sign = format!(
-            "{account}\n{perms}\nb\n{srt}\n\n{expiry}\n\nhttps,http\n{sv}\n\n",
-            account = self.account,
-            perms = perms,
-            srt = srt,
-            expiry = expiry,
-            sv = SAS_VERSION,
-        );
+    fn hmac(&self, string_to_sign: &str) -> Result<String> {
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.key).map_err(StorageError::other)?;
         mac.update(string_to_sign.as_bytes());
         Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
     }
 
-    /// Append an account-SAS query string (authorizing the given scope) to `url`.
-    fn apply_sas(&self, url: &mut Url, perms: &str, srt: &str, expiry: &str) -> Result<()> {
-        let sig = self.sign(perms, srt, expiry)?;
+    /// Append an **account** SAS (string-to-sign per "Create an account SAS",
+    /// version >= 2020-12-06) authorizing `srt`-scoped operations to `url`.
+    /// Used for the broad connection-level credential (needs account scope to
+    /// list containers); never for share links.
+    fn apply_account_sas(
+        &self,
+        url: &mut Url,
+        perms: &str,
+        srt: &str,
+        expiry: &str,
+        protocol: &str,
+    ) -> Result<()> {
+        let string_to_sign = format!(
+            "{account}\n{perms}\nb\n{srt}\n\n{expiry}\n\n{protocol}\n{sv}\n\n",
+            account = self.account,
+            sv = SAS_VERSION,
+        );
+        let sig = self.hmac(&string_to_sign)?;
         url.query_pairs_mut()
             .clear()
             .append_pair("sv", SAS_VERSION)
@@ -98,9 +105,62 @@ impl SasSigner {
             .append_pair("srt", srt)
             .append_pair("sp", perms)
             .append_pair("se", expiry)
-            .append_pair("spr", "https,http")
+            .append_pair("spr", protocol)
             .append_pair("sig", &sig);
         Ok(())
+    }
+
+    /// Append a **service** SAS scoped to a single blob (signedResource `b`,
+    /// string-to-sign per "Create a service SAS", version >= 2020-12-06) to
+    /// `url`. The blob-scoped `canonicalizedResource` is part of the signature,
+    /// so the link cannot be edited to read a different blob. Used for share
+    /// links.
+    fn apply_blob_service_sas(
+        &self,
+        url: &mut Url,
+        container: &str,
+        blob: &str,
+        perms: &str,
+        expiry: &str,
+        protocol: &str,
+    ) -> Result<()> {
+        let canonicalized_resource = format!("/blob/{}/{container}/{blob}", self.account);
+        // Field order (each on its own line; empty fields kept):
+        // sp, st, se, canonicalizedResource, signedIdentifier, sip, spr, sv,
+        // sr(=b), snapshotTime, signedEncryptionScope, rscc, rscd, rsce, rscl,
+        // rsct (no trailing newline on the last field).
+        let string_to_sign = format!(
+            "{perms}\n\n{expiry}\n{res}\n\n\n{protocol}\n{sv}\nb\n\n\n\n\n\n\n",
+            res = canonicalized_resource,
+            sv = SAS_VERSION,
+        );
+        let sig = self.hmac(&string_to_sign)?;
+        url.query_pairs_mut()
+            .clear()
+            .append_pair("sv", SAS_VERSION)
+            .append_pair("sr", "b")
+            .append_pair("sp", perms)
+            .append_pair("se", expiry)
+            .append_pair("spr", protocol)
+            .append_pair("sig", &sig);
+        Ok(())
+    }
+}
+
+/// SAS protocol restriction. Real Azure is HTTPS-only; the Azurite emulator is
+/// reached over plain HTTP, so it needs `https,http`.
+fn sas_protocol(endpoint_base: &str) -> &'static str {
+    let is_emulator = Url::parse(endpoint_base).ok().is_some_and(|u| {
+        u.scheme() == "http"
+            || matches!(
+                u.host_str(),
+                Some("127.0.0.1") | Some("localhost") | Some("[::1]")
+            )
+    });
+    if is_emulator {
+        "https,http"
+    } else {
+        "https"
     }
 }
 
@@ -125,6 +185,8 @@ pub struct AzBlobBackend {
     /// Endpoint base (no query), e.g. `http://127.0.0.1:10000/devstoreaccount1`.
     endpoint_base: String,
     signer: Option<Arc<SasSigner>>,
+    /// SAS `spr` value: `https` for real Azure, `https,http` for the emulator.
+    sas_protocol: &'static str,
 }
 
 /// Parse the AccountName/AccountKey/BlobEndpoint out of a connection string.
@@ -179,6 +241,8 @@ impl AzBlobBackend {
             .trim_end_matches('/')
             .to_string();
 
+        let protocol = sas_protocol(&endpoint_base);
+
         // Build the service URL with whatever auth query string applies, then
         // construct the client with no credential (the SAS in the URL authorizes).
         let mut service_url = Url::parse(&endpoint_base).map_err(StorageError::other)?;
@@ -195,7 +259,13 @@ impl AzBlobBackend {
                 };
                 // Connection-level account SAS: full blob permissions, all
                 // resource types, valid for 7 days.
-                signer.apply_sas(&mut service_url, "rwdlacup", "sco", &expiry_in(7 * 86_400))?;
+                signer.apply_account_sas(
+                    &mut service_url,
+                    "rwdlacup",
+                    "sco",
+                    &expiry_in(7 * 86_400),
+                    protocol,
+                )?;
                 Some(Arc::new(signer))
             }
             (None, Some(token)) => {
@@ -213,6 +283,7 @@ impl AzBlobBackend {
             can_sign,
             endpoint_base,
             signer,
+            sas_protocol: protocol,
         })
     }
 
@@ -678,10 +749,18 @@ impl StorageBackend for AzBlobBackend {
                 op: "cannot share a container".into(),
             });
         }
-        // Read-only, object-scoped account SAS over the blob URL.
+        // Read-only, single-blob-scoped service SAS (the blob path is part of
+        // the signature, so the link can't be edited to read another blob).
         let mut url = Url::parse(&format!("{}/{}/{}", self.endpoint_base, container, p.key))
             .map_err(StorageError::other)?;
-        signer.apply_sas(&mut url, "r", "o", &expiry_in(expiry_secs as i64))?;
+        signer.apply_blob_service_sas(
+            &mut url,
+            &container,
+            &p.key,
+            "r",
+            &expiry_in(expiry_secs as i64),
+            self.sas_protocol,
+        )?;
         Ok(url.to_string())
     }
 }

@@ -5,7 +5,8 @@ use wonderblob_core::azblob::{AzAuth, AzBlobBackend, AzBlobConfig};
 use wonderblob_core::vfs::{EntryKind, StorageBackend};
 
 /// Public, well-known Azurite development account key (not a secret).
-const DEV_KEY: &str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+const DEV_KEY: &str =
+    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
 
 fn enabled() -> bool {
     std::env::var("WONDERBLOB_TEST_AZBLOB").as_deref() == Ok("1")
@@ -26,7 +27,9 @@ async fn azblob_passes_vfs_contract() {
         eprintln!("skipped: set WONDERBLOB_TEST_AZBLOB=1 and run scripts/test-azblob-up.sh");
         return;
     }
-    let backend = AzBlobBackend::connect(test_config()).await.expect("connect");
+    let backend = AzBlobBackend::connect(test_config())
+        .await
+        .expect("connect");
     backend
         .ensure_test_container("wbtest")
         .await
@@ -40,7 +43,9 @@ async fn azblob_root_lists_containers_as_dirs() {
         eprintln!("skipped: set WONDERBLOB_TEST_AZBLOB=1");
         return;
     }
-    let backend = AzBlobBackend::connect(test_config()).await.expect("connect");
+    let backend = AzBlobBackend::connect(test_config())
+        .await
+        .expect("connect");
     backend
         .ensure_test_container("wbtest")
         .await
@@ -69,7 +74,9 @@ async fn azblob_multiblock_roundtrip_20mb() {
         eprintln!("skipped: set WONDERBLOB_TEST_AZBLOB=1 and run scripts/test-azblob-up.sh");
         return;
     }
-    let backend = AzBlobBackend::connect(test_config()).await.expect("connect");
+    let backend = AzBlobBackend::connect(test_config())
+        .await
+        .expect("connect");
     backend
         .ensure_test_container("wbtest")
         .await
@@ -114,7 +121,9 @@ async fn azblob_empty_file_roundtrip() {
         eprintln!("skipped: set WONDERBLOB_TEST_AZBLOB=1 and run scripts/test-azblob-up.sh");
         return;
     }
-    let backend = AzBlobBackend::connect(test_config()).await.expect("connect");
+    let backend = AzBlobBackend::connect(test_config())
+        .await
+        .expect("connect");
     backend
         .ensure_test_container("wbtest")
         .await
