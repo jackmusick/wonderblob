@@ -3,6 +3,23 @@ import type { StorageError } from "./api";
 export type ErrorContext = "list" | "mutate";
 
 /**
+ * Extracts the meaningful free-text field from a StorageError without ever
+ * falling back to `String(e)` (which yields "[object Object]" for a plain
+ * serialized error). Different kinds carry the useful string under different
+ * keys — `detail` (authFailed/network/conflict/other), `path`
+ * (notFound/permissionDenied/conflict), `op` (unsupported). Returns "" when
+ * there is nothing human-meaningful to show, so callers can hide the line.
+ */
+export function errorDetail(e: unknown): string {
+  const raw = e as Record<string, unknown> | null;
+  for (const key of ["detail", "path", "op"]) {
+    const v = raw?.[key];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return "";
+}
+
+/**
  * Maps a StorageError to a user-facing string.
  *   ctx "list"   – used when loading a directory listing fails (full-pane error state)
  *   ctx "mutate" – used for rename / delete / mkdir / upload failures (toast/strip)
@@ -33,8 +50,7 @@ export function describeError(e: unknown, ctx: ErrorContext): string {
     case "unsupported":
       return "Operation failed: not supported by this server.";
     default: {
-      const raw = e as Record<string, unknown>;
-      const detail = typeof raw?.detail === "string" ? raw.detail : String(e);
+      const detail = errorDetail(e);
       return ctx === "list"
         ? `Something went wrong loading this folder.${detail ? " " + detail : ""}`
         : `Operation failed.${detail ? " " + detail : ""}`;

@@ -12,7 +12,9 @@ use wonderblob_core::error::StorageError;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum Protocol {
-    Sftp, // S3/AzBlob/OneDrive added in later plans
+    Sftp,
+    S3,
+    AzBlob, // OneDrive etc. added in later plans
 }
 
 /// How to authenticate — the *method* only; secrets live in the keychain.
@@ -24,17 +26,59 @@ pub enum AuthMethod {
     Password,                 // password in keychain
 }
 
+/// S3 connection metadata. The secret (secret access key) lives in the keychain.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct S3Params {
+    pub access_key_id: String,
+    pub region: Option<String>,
+    /// Custom endpoint for MinIO/Wasabi/R2; `None` => real AWS.
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub force_path_style: bool,
+}
+
+/// Which single credential the keychain secret represents for Azure.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum AzAuthKind {
+    AccountKey,
+    ConnectionString,
+    Sas,
+}
+
+/// Azure Blob connection metadata. The secret (key / connection string / SAS)
+/// lives in the keychain.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AzBlobParams {
+    pub account: String,
+    /// Custom endpoint (e.g. Azurite path-style); `None` => real Azure.
+    pub endpoint: Option<String>,
+    pub auth_kind: AzAuthKind,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bookmark {
     pub id: Uuid,
     pub label: String,
     pub protocol: Protocol,
+    #[serde(default)]
     pub host: String,
+    #[serde(default)]
     pub port: u16,
+    #[serde(default)]
     pub username: String,
-    pub auth_method: AuthMethod,
+    /// SFTP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<AuthMethod>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3: Option<S3Params>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azblob: Option<AzBlobParams>,
 }
 
 pub struct BookmarkStore {
@@ -127,8 +171,10 @@ mod tests {
             host: "example.com".into(),
             port: 22,
             username: "jack".into(),
-            auth_method: AuthMethod::Agent,
+            auth_method: Some(AuthMethod::Agent),
             initial_path: Some("/var/www".into()),
+            s3: None,
+            azblob: None,
         };
         store.save(&b).unwrap();
         let loaded = store.load_all().unwrap();
@@ -136,5 +182,63 @@ mod tests {
         assert_eq!(loaded[0].label, "prod box");
         let raw = std::fs::read_to_string(store.file_path()).unwrap();
         assert!(!raw.to_lowercase().contains("password"));
+    }
+
+    #[test]
+    fn old_sftp_bookmark_json_still_deserializes() {
+        // A bookmarks.json written by Plan 1 (no s3/azblob/params; auth_method
+        // present, host/port/username present) must still load.
+        let json = r#"[{
+            "id": "11111111-1111-1111-1111-111111111111",
+            "label": "legacy",
+            "protocol": "sftp",
+            "host": "old.example.com",
+            "port": 2222,
+            "username": "jack",
+            "authMethod": { "type": "agent" },
+            "initialPath": "/srv"
+        }]"#;
+        let parsed: Vec<Bookmark> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let b = &parsed[0];
+        assert_eq!(b.protocol, Protocol::Sftp);
+        assert_eq!(b.host, "old.example.com");
+        assert_eq!(b.port, 2222);
+        assert_eq!(b.auth_method, Some(AuthMethod::Agent));
+        assert!(b.s3.is_none());
+        assert!(b.azblob.is_none());
+    }
+
+    #[test]
+    fn s3_bookmark_roundtrips_without_secret_in_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BookmarkStore::new(dir.path().to_path_buf());
+        let b = Bookmark {
+            id: uuid::Uuid::new_v4(),
+            label: "minio".into(),
+            protocol: Protocol::S3,
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            auth_method: None,
+            initial_path: Some("/wbtest".into()),
+            s3: Some(S3Params {
+                access_key_id: "AKIAEXAMPLE".into(),
+                region: Some("us-east-1".into()),
+                endpoint: Some("http://localhost:9000".into()),
+                force_path_style: true,
+            }),
+            azblob: None,
+        };
+        store.save(&b).unwrap();
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].protocol, Protocol::S3);
+        let params = loaded[0].s3.as_ref().expect("s3 params");
+        assert_eq!(params.access_key_id, "AKIAEXAMPLE");
+        assert!(params.force_path_style);
+        // No auth_method emitted for cloud bookmarks.
+        let raw = std::fs::read_to_string(store.file_path()).unwrap();
+        assert!(!raw.contains("authMethod"));
     }
 }

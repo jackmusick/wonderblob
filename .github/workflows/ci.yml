@@ -36,6 +36,18 @@ jobs:
       - name: SFTP agent + key-file auth tests
         run: ./scripts/test-sftp-auth.sh
 
+      - name: S3 contract tests (MinIO)
+        run: |
+          ./scripts/test-s3-up.sh
+          WONDERBLOB_TEST_S3=1 cargo test -p wonderblob-core --test s3_contract
+          ./scripts/test-s3-down.sh
+
+      - name: Azure Blob contract tests (Azurite)
+        run: |
+          ./scripts/test-azblob-up.sh
+          WONDERBLOB_TEST_AZBLOB=1 cargo test -p wonderblob-core --test azblob_contract
+          ./scripts/test-azblob-down.sh
+
   frontend:
     runs-on: ubuntu-latest
     steps:

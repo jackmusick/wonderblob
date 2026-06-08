@@ -11,6 +11,18 @@ async-trait = { workspace = true }
 russh = "0.46"
 russh-keys = "0.46"
 russh-sftp = "2"
+aws-config = "1.8.18"
+aws-sdk-s3 = "1.135.0"
+bytes = "1"
+futures = "0.3"
+aws-smithy-types = { version = "1.4.9", features = ["rt-tokio"] }
+tokio-util = { version = "0.7.18", features = ["io"] }
+azure_storage_blob = "=1.0.0"
+azure_core = "=1.0.0"
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

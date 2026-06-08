@@ -1,5 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
+  import { writeText } from "@tauri-apps/plugin-clipboard-manager";
   import { api, type Bookmark } from "$lib/api";
   import { describeError } from "$lib/errors";
   import BookmarkList from "$lib/components/BookmarkList.svelte";
@@ -20,6 +21,9 @@
 
   let toast = $state<string | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+  let copied = $state<string | null>(null);
+  let copiedTimer: ReturnType<typeof setTimeout> | null = null;
 
   function openNew() {
     editing = null;
@@ -103,6 +107,25 @@
     }
   }
 
+  async function shareSelected() {
+    const conn = $activeConnection;
+    if (!conn) return;
+    const entry = fileList?.selected() ?? null;
+    if (!entry || entry.kind === "dir") {
+      showToast("Select a file to share.");
+      return;
+    }
+    try {
+      const url = await api.shareLink(conn.id, entry.path, 24 * 60 * 60);
+      await writeText(url);
+      copied = "Link copied to clipboard";
+      if (copiedTimer) clearTimeout(copiedTimer);
+      copiedTimer = setTimeout(() => (copied = null), 2500);
+    } catch (e) {
+      showToast(opError(e, "Couldn't create share link"));
+    }
+  }
+
   async function disconnect() {
     const conn = $activeConnection;
     if (!conn) return;
@@ -137,6 +160,9 @@
           <button class="ghost" onclick={upload} disabled={uploading}>
             {uploading ? "Uploading…" : "Upload"}
           </button>
+          {#if $activeConnection?.capabilities.canPresign}
+            <button class="ghost" onclick={shareSelected}>Share Link</button>
+          {/if}
           <button class="ghost" onclick={disconnect}>Disconnect</button>
         </div>
       </div>
@@ -145,6 +171,9 @@
       </div>
       {#if toast}
         <div class="toast" role="alert">{toast}</div>
+      {/if}
+      {#if copied}
+        <div class="copied" role="status">{copied}</div>
       {/if}
     {:else}
       <div class="empty">
@@ -222,6 +251,14 @@
     color: var(--danger);
     border-top: 1px solid var(--border);
     background: var(--bg-content);
+  }
+  .copied {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    font-size: var(--text-small);
+    color: var(--fg-primary);
+    border-top: 1px solid var(--border);
+    background: var(--bg-selected);
   }
   .empty {
     flex: 1;

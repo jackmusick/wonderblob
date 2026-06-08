@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, type Entry } from "../api";
-  import { describeError } from "../errors";
+  import { describeError, errorDetail } from "../errors";
   import { formatMtime, formatSize } from "../format";
   import { activeConnection, currentPath } from "../stores/session";
 
@@ -74,10 +74,7 @@
       if (mySeq !== seq) return;
       entries = [];
       selectedIndex = -1;
-      const msg = describeError(e, "list");
-      const err = e as { detail?: unknown };
-      const detail = typeof err?.detail === "string" ? err.detail : String(e);
-      error = { message: msg, detail };
+      error = { message: describeError(e, "list"), detail: errorDetail(e) };
     } finally {
       if (mySeq === seq) {
         loading = false;
@@ -92,6 +89,10 @@
   export function refresh() {
     const conn = $activeConnection;
     if (conn) load(conn.id, $currentPath);
+  }
+
+  export function selected(): Entry | null {
+    return selectedIndex >= 0 && selectedIndex < entries.length ? entries[selectedIndex] : null;
   }
 
   function cancelConfirm() {
@@ -250,7 +251,9 @@
   {:else if error}
     <div class="state">
       <p class="error-message">{error.message}</p>
-      <p class="error-detail" title={error.detail}>{error.detail}</p>
+      {#if error.detail}
+        <p class="error-detail" title={error.detail}>{error.detail}</p>
+      {/if}
     </div>
   {:else if !loading && entries.length === 0}
     <div class="state"><p class="muted">Empty folder</p></div>
