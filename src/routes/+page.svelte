@@ -34,6 +34,14 @@
     initTransfers();
   });
 
+  // Start the edit store once (reconcile + subscribe to edit:// events).
+  $effect(() => {
+    initEdit({
+      onSaved: (name) => showToast(`Saved “${name}”`),
+      onError: showToast,
+    });
+  });
+
   // Refresh the listing when an upload completes (it may be in the current dir).
   let seenCompleted = new Set<number>();
   $effect(() => {
@@ -189,9 +197,11 @@
           <button class="ghost" onclick={upload} disabled={uploading}>
             {uploading ? "Uploading…" : "Upload"}
           </button>
+          <button class="ghost" onclick={download}>Download</button>
           {#if $activeConnection?.capabilities.canPresign}
             <button class="ghost" onclick={shareSelected}>Share Link</button>
           {/if}
+          <EditSessions />
           <button class="ghost" onclick={() => (transfersOpen = !transfersOpen)}>
             Transfers{#if $activeTransferCount > 0} ({$activeTransferCount}){/if}
           </button>
@@ -235,6 +245,10 @@
 
 {#if sheetOpen}
   <ConnectionSheet bookmark={editing} onclose={closeSheet} onsaved={onSaved} />
+{/if}
+
+{#if $editConflicts.length > 0}
+  <ConflictModal session={$editConflicts[0]} />
 {/if}
 
 <style>
