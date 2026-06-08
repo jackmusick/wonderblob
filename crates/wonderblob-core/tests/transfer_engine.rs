@@ -206,3 +206,39 @@ async fn pause_keeps_partial_then_resume_completes_from_offset() {
     settle(|| store.get(id).unwrap().unwrap().status == TransferStatus::Completed).await;
     assert_eq!(std::fs::read(&local).unwrap(), body);
 }
+
+#[tokio::test]
+async fn cancel_stops_and_removes_partial_file() {
+    let backend = Arc::new(MockBackend::new());
+    backend.put("/r.bin", vec![7u8; 1_000_000]).await;
+    backend.set_read_delay_ms(3); // observable mid-flight so cancel hits a running stream
+    let store = Arc::new(TransferStore::open_in_memory().unwrap());
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("r.bin");
+    let engine = TransferEngine::new(
+        store.clone(),
+        Arc::new(OneBackend(backend.clone())),
+        Arc::new(CollectSink::default()),
+        fast_cfg(1),
+    );
+    let id = engine
+        .enqueue(NewTransfer {
+            connection_id: 1,
+            direction: Direction::Down,
+            remote_path: "/r.bin".into(),
+            local_path: local.to_string_lossy().into(),
+            name: "r.bin".into(),
+            total_bytes: Some(1_000_000),
+        })
+        .await
+        .unwrap();
+    settle(|| {
+        let t = store.get(id).unwrap().unwrap();
+        t.status == TransferStatus::Running && t.transferred_bytes > 0
+    })
+    .await;
+    engine.cancel(id).await.unwrap();
+    settle(|| store.get(id).unwrap().unwrap().status == TransferStatus::Canceled).await;
+    // Give the cleanup a beat, then assert the partial is gone.
+    settle(|| !local.exists()).await;
+}

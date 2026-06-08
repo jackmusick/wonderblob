@@ -331,6 +331,39 @@ impl TransferEngine {
         Ok(())
     }
 
+    /// Stop a transfer (running or not) and clean the partial download artifact.
+    pub async fn cancel(self: &Arc<Self>, id: TransferId) -> crate::error::Result<()> {
+        let running = {
+            let map = self.controls.lock().unwrap();
+            map.get(&id)
+                .map(|c| {
+                    c.store(C_CANCEL, Ordering::SeqCst);
+                })
+                .is_some()
+        };
+        // If it wasn't running (queued/paused/failed), record canceled now.
+        let t = self.store.get(id)?;
+        if let Some(t) = t {
+            if !running {
+                self.store.set_status(id, TransferStatus::Canceled, None)?;
+                self.emit_state(id);
+            }
+            // Clean the partial download artifact regardless of running state.
+            if t.direction == Direction::Down {
+                let _ = tokio::fs::remove_file(&t.local_path).await;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn clear_completed(&self) -> crate::error::Result<usize> {
+        self.store.clear_completed()
+    }
+
+    pub fn list(&self) -> crate::error::Result<Vec<Transfer>> {
+        self.store.list()
+    }
+
     /// Upload streaming is implemented in Task 8.
     async fn stream_upload(
         &self,
