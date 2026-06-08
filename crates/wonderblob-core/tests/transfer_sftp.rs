@@ -1,10 +1,13 @@
 //! Real pause/resume against the Dockerized OpenSSH server (Plan 1 fixture).
 //! Gated by WONDERBLOB_TEST_SFTP=1; run scripts/test-sftp-up.sh first.
 
+mod sftp_support;
+
+use sftp_support::{connect_accept_once, PASS};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
+use wonderblob_core::sftp::SftpAuth;
 use wonderblob_core::transfer::engine::{
     BackendResolver, EngineConfig, EventSink, TransferEngine, TransferEvent,
 };
@@ -34,16 +37,8 @@ async fn sftp_download_pauses_and_resumes_byte_identical() {
         eprintln!("skipped: set WONDERBLOB_TEST_SFTP=1 and run scripts/test-sftp-up.sh");
         return;
     }
-    let backend: Arc<dyn StorageBackend> = Arc::new(
-        SftpBackend::connect(SftpConfig {
-            host: "localhost".into(),
-            port: 2222,
-            username: "wb".into(),
-            auth: SftpAuth::Password("wbpass".into()),
-        })
-        .await
-        .expect("connect"),
-    );
+    let backend: Arc<dyn StorageBackend> =
+        Arc::new(connect_accept_once(SftpAuth::Password(PASS.into())).await);
 
     // Stage a multi-MiB remote file via the backend itself.
     let remote = "/config/wb-transfer-big.bin";

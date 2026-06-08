@@ -9,8 +9,11 @@ use wonderblob_core::edit::{
     check_conflict, download_to_temp, flush_if_pending, save_back, temp_mtime, ConflictCheck,
     FlushResult,
 };
-use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
+use wonderblob_core::sftp::SftpAuth;
 use wonderblob_core::vfs::StorageBackend;
+
+mod sftp_support;
+use sftp_support::{connect_accept_once, PASS};
 
 fn enabled() -> bool {
     std::env::var("WONDERBLOB_TEST_SFTP").as_deref() == Ok("1")
@@ -29,16 +32,7 @@ fn write_newer(path: &Path, bytes: &[u8], marker: Option<SystemTime>) {
 }
 
 async fn connect() -> Arc<dyn StorageBackend> {
-    Arc::new(
-        SftpBackend::connect(SftpConfig {
-            host: "localhost".into(),
-            port: 2222,
-            username: "wb".into(),
-            auth: SftpAuth::Password("wbpass".into()),
-        })
-        .await
-        .expect("connect"),
-    )
+    Arc::new(connect_accept_once(SftpAuth::Password(PASS.into())).await)
 }
 
 #[tokio::test]
