@@ -114,6 +114,42 @@
   let typeahead = "";
   let typeaheadTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Sorting. `entries` is kept in sorted order (dirs always before files), so
+  // all the index-based selection logic below is unaffected.
+  let sortCol = $state<"name" | "size" | "mtime">("name");
+  let sortDir = $state<1 | -1>(1);
+
+  function cmp(a: Entry, b: Entry): number {
+    const ad = a.kind === "dir" ? 0 : 1;
+    const bd = b.kind === "dir" ? 0 : 1;
+    if (ad !== bd) return ad - bd; // dirs first, regardless of direction
+    let r: number;
+    if (sortCol === "size") r = (a.size ?? 0) - (b.size ?? 0);
+    else if (sortCol === "mtime") r = (a.modifiedMs ?? 0) - (b.modifiedMs ?? 0);
+    else r = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+    if (r === 0)
+      r = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+    return r * sortDir;
+  }
+
+  function sortEntries(arr: Entry[]): Entry[] {
+    return [...arr].sort(cmp);
+  }
+
+  function setSort(col: "name" | "size" | "mtime") {
+    const prevPath = selected()?.path ?? null;
+    if (sortCol === col) sortDir = sortDir === 1 ? -1 : 1;
+    else {
+      sortCol = col;
+      sortDir = 1;
+    }
+    entries = sortEntries(entries);
+    if (prevPath) {
+      const idx = entries.findIndex((e) => e.path === prevPath);
+      if (idx >= 0) selectedIndex = idx;
+    }
+  }
+
   $effect(() => {
     const conn = $activeConnection;
     const path = $currentPath;
@@ -154,8 +190,8 @@
     try {
       const result = await api.listDir(id, path);
       if (mySeq !== seq) return;
-      entries = result;
-      selectedIndex = result.length > 0 ? 0 : -1;
+      entries = sortEntries(result);
+      selectedIndex = entries.length > 0 ? 0 : -1;
     } catch (e) {
       if (mySeq !== seq) return;
       entries = [];
@@ -348,9 +384,19 @@
   oncontextmenu={openEmptyMenu}
 >
   <div class="header" role="presentation">
-    <span class="col-name">Name{#if opening}<span class="opening">· Opening…</span>{/if}</span>
-    <span class="col-size">Size</span>
-    <span class="col-mtime">Modified</span>
+    <button class="col-name sort-btn" onclick={() => setSort("name")}>
+      Name
+      {#if sortCol === "name"}<span class="arr">{sortDir === 1 ? "▲" : "▼"}</span>{/if}
+      {#if opening}<span class="opening">· Opening…</span>{/if}
+    </button>
+    <button class="col-size sort-btn" onclick={() => setSort("size")}>
+      {#if sortCol === "size"}<span class="arr">{sortDir === 1 ? "▲" : "▼"}</span>{/if}
+      Size
+    </button>
+    <button class="col-mtime sort-btn" onclick={() => setSort("mtime")}>
+      {#if sortCol === "mtime"}<span class="arr">{sortDir === 1 ? "▲" : "▼"}</span>{/if}
+      Modified
+    </button>
   </div>
 
   {#if showSpinner}
@@ -441,6 +487,28 @@
     font-size: var(--text-small);
     color: var(--fg-secondary);
     user-select: none;
+  }
+  .sort-btn {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    background: transparent;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    cursor: default;
+  }
+  .col-size.sort-btn,
+  .col-mtime.sort-btn {
+    justify-content: flex-end;
+  }
+  .sort-btn:hover {
+    color: var(--fg-primary);
+  }
+  .arr {
+    font-size: 8px;
+    line-height: 1;
   }
   .row {
     display: flex;
