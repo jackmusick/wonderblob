@@ -18,6 +18,21 @@ export type AuthSpec =
   | { type: "keyFile"; path: string; passphrase?: string }
   | { type: "password"; password: string };
 
+export type AuthMethod =
+  | { type: "agent" }
+  | { type: "keyFile"; path: string }
+  | { type: "password" };
+export interface Bookmark {
+  id: string;
+  label: string;
+  protocol: "sftp";
+  host: string;
+  port: number;
+  username: string;
+  authMethod: AuthMethod;
+  initialPath: string | null;
+}
+
 export const api = {
   connectSftp: (args: { host: string; port: number; username: string; auth: AuthSpec }) =>
     invoke<number>("connect_sftp", { args }),
@@ -31,4 +46,9 @@ export const api = {
   renameEntry: (id: number, from: string, to: string) =>
     invoke<void>("rename_entry", { id, from, to }),
   makeDir: (id: number, path: string) => invoke<void>("make_dir", { id, path }),
+  bookmarksList: () => invoke<Bookmark[]>("bookmarks_list"),
+  bookmarkSave: (bookmark: Bookmark, secret?: string) =>
+    invoke<void>("bookmark_save", { bookmark, secret }),
+  bookmarkDelete: (id: string) => invoke<void>("bookmark_delete", { id }),
+  connectBookmark: (id: string) => invoke<number>("connect_bookmark", { id }),
 };

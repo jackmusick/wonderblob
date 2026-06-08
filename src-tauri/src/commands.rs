@@ -1,8 +1,9 @@
+use crate::bookmarks::{secrets, Bookmark, BookmarkStore};
 use crate::state::{AppState, ConnectionId};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::State;
+use tauri::{Manager, State};
 use tokio::io::AsyncWriteExt;
 use wonderblob_core::error::StorageError;
 use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
@@ -139,4 +140,92 @@ pub async fn make_dir(
     path: String,
 ) -> Result<(), StorageError> {
     state.get(id).await?.mkdir(&path).await
+}
+
+// ---------------------------------------------------------------------------
+// Bookmarks
+// ---------------------------------------------------------------------------
+
+fn store(app: &tauri::AppHandle) -> Result<BookmarkStore, StorageError> {
+    let dir = app.path().app_config_dir().map_err(StorageError::other)?;
+    Ok(BookmarkStore::new(dir))
+}
+
+/// Run a blocking keychain call off the async runtime — KWallet/secret-service
+/// can block indefinitely waiting for the user to unlock the wallet.
+async fn keychain<T, F>(f: F) -> Result<T, StorageError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, StorageError> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(StorageError::other)?
+}
+
+#[tauri::command]
+pub async fn bookmarks_list(app: tauri::AppHandle) -> Result<Vec<Bookmark>, StorageError> {
+    store(&app)?.load_all()
+}
+
+#[tauri::command]
+pub async fn bookmark_save(
+    app: tauri::AppHandle,
+    bookmark: Bookmark,
+    secret: Option<String>,
+) -> Result<(), StorageError> {
+    if let Some(s) = secret {
+        let id = bookmark.id.to_string();
+        keychain(move || secrets::set(&id, &s)).await?;
+    }
+    store(&app)?.save(&bookmark)
+}
+
+#[tauri::command]
+pub async fn bookmark_delete(app: tauri::AppHandle, id: uuid::Uuid) -> Result<(), StorageError> {
+    let key = id.to_string();
+    keychain(move || secrets::delete(&key)).await?;
+    store(&app)?.delete(id)
+}
+
+/// Connect using a saved bookmark: resolves the secret from the keychain.
+#[tauri::command]
+pub async fn connect_bookmark(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: uuid::Uuid,
+) -> Result<ConnectionId, StorageError> {
+    use crate::bookmarks::AuthMethod;
+    let b = store(&app)?
+        .load_all()?
+        .into_iter()
+        .find(|b| b.id == id)
+        .ok_or_else(|| StorageError::Other { detail: "bookmark not found".into() })?;
+    let auth = match b.auth_method {
+        AuthMethod::Agent => SftpAuth::Agent,
+        AuthMethod::KeyFile { path } => {
+            let key = b.id.to_string();
+            SftpAuth::KeyFile { path, passphrase: keychain(move || secrets::get(&key)).await? }
+        }
+        AuthMethod::Password => {
+            let key = b.id.to_string();
+            SftpAuth::Password(keychain(move || secrets::get(&key)).await?.ok_or(
+                StorageError::AuthFailed { detail: "no saved password".into() },
+            )?)
+        }
+    };
+    let backend = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        SftpBackend::connect(SftpConfig {
+            host: b.host,
+            port: b.port,
+            username: b.username,
+            auth,
+        }),
+    )
+    .await
+    .map_err(|_| StorageError::Network { detail: "connection timed out".into() })??;
+    let cid = state.next_id();
+    state.connections.write().await.insert(cid, Arc::new(backend));
+    Ok(cid)
 }

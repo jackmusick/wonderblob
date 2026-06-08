@@ -1,3 +1,4 @@
+mod bookmarks;
 mod commands;
 #[cfg(test)]
 mod fake_backend;
@@ -17,6 +18,10 @@ pub fn run() {
             commands::delete_entry,
             commands::rename_entry,
             commands::make_dir,
+            commands::bookmarks_list,
+            commands::bookmark_save,
+            commands::bookmark_delete,
+            commands::connect_bookmark,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
