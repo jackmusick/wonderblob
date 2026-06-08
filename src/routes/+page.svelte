@@ -8,8 +8,10 @@
   import Breadcrumb from "$lib/components/Breadcrumb.svelte";
   import ConflictModal from "$lib/components/ConflictModal.svelte";
   import ConnectionSheet from "$lib/components/ConnectionSheet.svelte";
+  import ContextMenu, { type MenuItem } from "$lib/components/ContextMenu.svelte";
   import EditSessions from "$lib/components/EditSessions.svelte";
   import FileList from "$lib/components/FileList.svelte";
+  import Icon from "$lib/components/Icon.svelte";
   import PreviewOverlay from "$lib/components/PreviewOverlay.svelte";
   import TransfersPanel from "$lib/components/TransfersPanel.svelte";
   import { activeConnection, currentPath } from "$lib/stores/session";
@@ -29,6 +31,20 @@
   let uploading = $state(false);
 
   let transfersOpen = $state(false);
+
+  // Right-click menu for the Download toolbar icon (primary click = ~/Downloads).
+  let downloadMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  function openDownloadMenu(e: MouseEvent) {
+    e.preventDefault();
+    downloadMenu = {
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        { label: "Download to ~/Downloads", icon: "download", action: downloadToDownloads },
+        { label: "Download As…", icon: "download", action: download },
+      ],
+    };
+  }
 
   // True while OS files are dragged over the window — drives the drop highlight.
   let dragOver = $state(false);
@@ -265,23 +281,48 @@
               onblur={() => (newFolderOpen = false)}
             />
           {:else}
-            <button class="ghost" onclick={openNewFolder}>New Folder</button>
+            <button class="icon-btn" title="New folder" aria-label="New folder" onclick={openNewFolder}>
+              <Icon name="folder-plus" />
+            </button>
           {/if}
-          <button class="ghost" onclick={upload} disabled={uploading}>
-            {uploading ? "Uploading…" : "Upload"}
+          <button
+            class="icon-btn"
+            title="Upload files"
+            aria-label="Upload files"
+            onclick={upload}
+            disabled={uploading}
+          >
+            <Icon name="upload" />
           </button>
-          <button class="ghost" onclick={download}>Download</button>
-          <button class="ghost" onclick={downloadToDownloads} title="Download to ~/Downloads">
-            To Downloads
+          <button
+            class="icon-btn"
+            title="Download to ~/Downloads (right-click for Download As…)"
+            aria-label="Download"
+            onclick={downloadToDownloads}
+            oncontextmenu={openDownloadMenu}
+          >
+            <Icon name="download" />
           </button>
           {#if $activeConnection?.capabilities.canPresign}
-            <button class="ghost" onclick={shareSelected}>Share Link</button>
+            <button class="icon-btn" title="Copy share link" aria-label="Share link" onclick={shareSelected}>
+              <Icon name="share" />
+            </button>
           {/if}
+          <span class="sep"></span>
           <EditSessions />
-          <button class="ghost" onclick={() => (transfersOpen = !transfersOpen)}>
-            Transfers{#if $activeTransferCount > 0} ({$activeTransferCount}){/if}
+          <button
+            class="icon-btn"
+            class:on={transfersOpen}
+            title="Transfers"
+            aria-label="Transfers"
+            onclick={() => (transfersOpen = !transfersOpen)}
+          >
+            <Icon name="transfers" />
+            {#if $activeTransferCount > 0}<span class="badge">{$activeTransferCount}</span>{/if}
           </button>
-          <button class="ghost" onclick={disconnect}>Disconnect</button>
+          <button class="icon-btn" title="Disconnect" aria-label="Disconnect" onclick={disconnect}>
+            <Icon name="power" />
+          </button>
         </div>
       </div>
       <div class="browser" class:drop-target={dragOver}>
@@ -332,6 +373,15 @@
   <ConflictModal session={$editConflicts[0]} />
 {/if}
 
+{#if downloadMenu}
+  <ContextMenu
+    x={downloadMenu.x}
+    y={downloadMenu.y}
+    items={downloadMenu.items}
+    onclose={() => (downloadMenu = null)}
+  />
+{/if}
+
 <style>
   .shell { display: flex; height: 100vh; }
   .sidebar {
@@ -357,23 +407,51 @@
     gap: 4px;
     flex-shrink: 0;
   }
-  .ghost {
-    height: 24px;
-    padding: 0 9px;
-    font-size: var(--text-base);
-    font-family: var(--font-ui);
+  .icon-btn {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
     color: var(--fg-secondary);
     background: transparent;
     border: none;
     border-radius: var(--radius);
-    white-space: nowrap;
+    flex-shrink: 0;
   }
-  .ghost:hover:not(:disabled) {
+  .icon-btn:hover:not(:disabled) {
     background: var(--bg-hover);
     color: var(--fg-primary);
   }
-  .ghost:disabled {
+  .icon-btn.on {
+    background: var(--bg-selected);
+    color: var(--accent);
+  }
+  .icon-btn:disabled {
     opacity: 0.55;
+  }
+  .badge {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 600;
+    color: #fff;
+    background: var(--accent);
+    border-radius: 7px;
+  }
+  .actions .sep {
+    width: 1px;
+    height: 18px;
+    margin: 0 2px;
+    background: var(--border);
   }
   .folder-input {
     width: 160px;
