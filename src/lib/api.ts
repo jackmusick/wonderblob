@@ -108,6 +108,29 @@ export interface AzBlobConnectArgs {
   secret: string;
 }
 
+export type PreviewKind = "text" | "image" | "pdf" | "tooLarge" | "unsupported";
+export interface PreviewPlan {
+  kind: PreviewKind;
+  size?: number; // tooLarge
+  cap?: number; // tooLarge
+  ext?: string; // unsupported
+}
+export interface PreviewResult {
+  plan: PreviewPlan;
+  text: string | null;
+  dataUrl: string | null;
+}
+
+export interface EditSessionInfo {
+  sessionId: number;
+  connectionId: number;
+  remotePath: string;
+  name: string;
+  hasConflict: boolean;
+}
+
+export type ConflictAction = "overwrite" | "saveAsCopy" | "discard";
+
 export const api = {
   connectSftp: (args: { host: string; port: number; username: string; auth: AuthSpec }) =>
     invoke<ConnectResult>("connect_sftp", { args }),
@@ -136,4 +159,13 @@ export const api = {
     invoke<void>("bookmark_save", { bookmark, secret }),
   bookmarkDelete: (id: string) => invoke<void>("bookmark_delete", { id }),
   connectBookmark: (id: string) => invoke<ConnectResult>("connect_bookmark", { id }),
+  openInEditor: (id: number, path: string) =>
+    invoke<number>("open_in_editor", { id, path }),
+  listEditSessions: () => invoke<EditSessionInfo[]>("list_edit_sessions"),
+  closeEditSession: (sessionId: number, keepTemp: boolean) =>
+    invoke<void>("close_edit_session", { sessionId, keepTemp }),
+  resolveConflict: (sessionId: number, action: ConflictAction) =>
+    invoke<void>("resolve_conflict", { sessionId, action }),
+  previewFile: (id: number, path: string, name: string, size?: number) =>
+    invoke<PreviewResult>("preview_file", { id, path, name, size: size ?? null }),
 };
