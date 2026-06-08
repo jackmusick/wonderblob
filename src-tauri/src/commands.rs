@@ -453,6 +453,77 @@ pub async fn enqueue_upload(
         .await
 }
 
+/// Enqueue uploads for OS-dropped paths into `dest_dir`.
+///
+/// Dropped directories contribute their immediate file children (see
+/// `dropfiles::expand_dropped`). Each resolved local file becomes an upload to
+/// `dest_dir/<basename>` on connection `id`, reusing the same enqueue path as
+/// the toolbar Upload action. Returns the new transfer ids.
+#[tauri::command]
+pub async fn enqueue_dropped(
+    engine: State<'_, Arc<TransferEngine>>,
+    id: ConnectionId,
+    dest_dir: String,
+    paths: Vec<String>,
+) -> Result<Vec<TransferId>, StorageError> {
+    let dir = dest_dir.trim_end_matches('/');
+    let mut ids = Vec::new();
+    for local in crate::dropfiles::expand_dropped(&paths) {
+        let base = basename_of(&local);
+        let remote = if dir.is_empty() {
+            format!("/{base}")
+        } else {
+            format!("{dir}/{base}")
+        };
+        let total = tokio::fs::metadata(&local).await.ok().map(|m| m.len());
+        let new_id = engine
+            .enqueue(NewTransfer {
+                connection_id: id,
+                direction: Direction::Up,
+                name: base,
+                remote_path: remote,
+                local_path: local,
+                total_bytes: total,
+            })
+            .await?;
+        ids.push(new_id);
+    }
+    Ok(ids)
+}
+
+/// Drag-out fallback: download a remote file straight into the OS Downloads dir
+/// (no save dialog). Complements the save-dialog Download button. True deferred
+/// OS drag-out (incl. macOS file-promise drags) is post-v1; see README.
+#[tauri::command]
+pub async fn enqueue_download_to_downloads(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    engine: State<'_, Arc<TransferEngine>>,
+    id: ConnectionId,
+    remote_path: String,
+    total_bytes: Option<u64>,
+) -> Result<TransferId, StorageError> {
+    let downloads = app.path().download_dir().map_err(StorageError::other)?;
+    let local = downloads.join(basename_of(&remote_path));
+    let total = match total_bytes {
+        Some(b) => Some(b),
+        None => match state.get(id).await {
+            Ok(b) => b.stat(&remote_path).await.ok().and_then(|e| e.size),
+            Err(_) => None,
+        },
+    };
+    engine
+        .enqueue(NewTransfer {
+            connection_id: id,
+            direction: Direction::Down,
+            name: basename_of(&remote_path),
+            remote_path,
+            local_path: local.to_string_lossy().into_owned(),
+            total_bytes: total,
+        })
+        .await
+}
+
 #[tauri::command]
 pub async fn pause_transfer(
     engine: State<'_, Arc<TransferEngine>>,

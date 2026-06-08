@@ -193,6 +193,17 @@ export const api = {
     invoke<number>("enqueue_download", { id, remotePath, localPath, totalBytes: totalBytes ?? null }),
   enqueueUpload: (id: number, localPath: string, remotePath: string) =>
     invoke<number>("enqueue_upload", { id, localPath, remotePath }),
+  // Drag-in: enqueue uploads for OS-dropped paths into destDir. Dropped dirs
+  // contribute their immediate file children (one level) — see src-tauri/dropfiles.rs.
+  enqueueDropped: (id: number, destDir: string, paths: string[]) =>
+    invoke<number[]>("enqueue_dropped", { id, destDir, paths }),
+  // Drag-out fallback: download a remote file straight into the OS Downloads dir.
+  enqueueDownloadToDownloads: (id: number, remotePath: string, totalBytes?: number) =>
+    invoke<number>("enqueue_download_to_downloads", {
+      id,
+      remotePath,
+      totalBytes: totalBytes ?? null,
+    }),
   pauseTransfer: (transferId: number) => invoke<void>("pause_transfer", { transferId }),
   resumeTransfer: (transferId: number, connectionId?: number) =>
     invoke<void>("resume_transfer", { transferId, connectionId: connectionId ?? null }),

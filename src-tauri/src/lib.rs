@@ -1,5 +1,6 @@
 mod bookmarks;
 mod commands;
+mod dropfiles;
 mod edit;
 #[cfg(test)]
 mod fake_backend;
@@ -41,6 +42,8 @@ pub fn run() {
             commands::list_dir,
             commands::enqueue_download,
             commands::enqueue_upload,
+            commands::enqueue_dropped,
+            commands::enqueue_download_to_downloads,
             commands::pause_transfer,
             commands::resume_transfer,
             commands::cancel_transfer,
