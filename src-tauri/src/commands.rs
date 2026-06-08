@@ -81,9 +81,18 @@ pub async fn download_file(
     let mut r = b.read(&remote_path, 0).await?;
     let mut f =
         tokio::fs::File::create(&local_path).await.map_err(StorageError::other)?;
-    tokio::io::copy(&mut r, &mut f).await.map_err(StorageError::other)?;
-    f.flush().await.map_err(StorageError::other)?;
-    Ok(())
+    let result = async {
+        tokio::io::copy(&mut r, &mut f).await.map_err(StorageError::other)?;
+        f.flush().await.map_err(StorageError::other)?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        // Best-effort: don't leave a truncated partial file behind.
+        drop(f); // close the handle first (required on Windows)
+        let _ = tokio::fs::remove_file(&local_path).await;
+    }
+    result
 }
 
 #[tauri::command]
@@ -97,6 +106,8 @@ pub async fn upload_file(
     let mut f =
         tokio::fs::File::open(&local_path).await.map_err(StorageError::other)?;
     let mut w = b.write(&remote_path).await?;
+    // FIXME(v1): remote partial file is left behind; TransferEngine (Plan 3)
+    // replaces this whole path with resumable chunked uploads + cleanup.
     tokio::io::copy(&mut f, &mut w).await.map_err(StorageError::other)?;
     w.shutdown().await.map_err(StorageError::other)?;
     Ok(())
