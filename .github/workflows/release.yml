@@ -1,0 +1,68 @@
+name: Release
+
+# Tag-gated: pushing a `v*` tag (e.g. v0.6.0) builds installers on each native
+# runner and uploads them to a DRAFT prerelease for review before publishing.
+# Builds are UNSIGNED (no notarization / code-signing) — see README for the
+# Gatekeeper / SmartScreen caveats. Do not run casually: macOS + Windows runners
+# are billed and a draft release is created.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest # Apple Silicon (arm64)
+            args: "--target aarch64-apple-darwin"
+          - platform: macos-latest # Intel (x86_64)
+            args: "--target x86_64-apple-darwin"
+          - platform: ubuntu-22.04 # NOT ubuntu-latest: webkit2gtk4.1 availability
+            args: ""
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux deps (Tauri + keyring)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libssl-dev \
+            libdbus-1-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # tauri-action runs `beforeBuildCommand` (npm run build) then `tauri build`
+      # and attaches every produced installer to the release. No signing env
+      # vars (APPLE_CERTIFICATE / TAURI_SIGNING_PRIVATE_KEY / etc.) — unsigned v1.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Wonderblob ${{ github.ref_name }}"
+          releaseBody: "Unsigned builds — see the README for Gatekeeper / SmartScreen / AppImage notes. Download the asset for your platform."
+          releaseDraft: true
+          prerelease: true
+          args: ${{ matrix.args }}

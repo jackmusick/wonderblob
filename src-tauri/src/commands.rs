@@ -8,9 +8,12 @@ use tauri::{Manager, State};
 use wonderblob_core::azblob::{AzAuth, AzBlobBackend, AzBlobConfig};
 use wonderblob_core::edit::{image_mime, preview_plan, PreviewPlan, PREVIEW_CAP_BYTES};
 use wonderblob_core::error::StorageError;
+use wonderblob_core::hostkey::HostKeyStore;
 use wonderblob_core::onedrive::{OneDriveBackend, OneDriveConfig, RefreshingTokenProvider};
 use wonderblob_core::s3::{S3Backend, S3Config};
-use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
+use wonderblob_core::sftp::{
+    HostKeyDecision, SftpAuth, SftpBackend, SftpConfig, SftpConnectOutcome,
+};
 use wonderblob_core::transfer::engine::TransferEngine;
 use wonderblob_core::transfer::model::{Direction, Transfer, TransferId};
 use wonderblob_core::transfer::store::NewTransfer;
@@ -40,6 +43,20 @@ pub struct SftpConnectArgs {
     pub port: u16,
     pub username: String,
     pub auth: AuthSpec,
+    /// The user's host-key decision on a retry (TOFU phase 2). `None` on the
+    /// first attempt → verify against the app `known_hosts` store (phase 1).
+    #[serde(default)]
+    pub host_key: Option<HostKeyApproval>,
+}
+
+/// The frontend's host-key decision, mirrored from `api.ts`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostKeyApproval {
+    /// Opaque base64 of the key the user approved (round-tripped from phase 1).
+    pub key_b64: String,
+    /// accept-and-remember (true, persist to `known_hosts`) vs accept-once (false).
+    pub remember: bool,
 }
 
 /// Returned by every connect command so the frontend can gate UI on capabilities.
@@ -48,6 +65,57 @@ pub struct SftpConnectArgs {
 pub struct ConnectResult {
     pub id: ConnectionId,
     pub capabilities: Capabilities,
+}
+
+/// SFTP connect result: either a live connection or a host-key decision-needed
+/// state the frontend turns into an approval dialog (TOFU). Cloud connect
+/// commands keep returning [`ConnectResult`]; only SFTP-capable paths use this.
+#[derive(serde::Serialize)]
+// `rename_all` on an enum renames the VARIANT names only — NOT the struct-variant
+// FIELDS. Without `rename_all_fields`, `key_b64` would serialize as snake_case and
+// the frontend (which reads `keyB64` and round-trips it back into the camelCase
+// `HostKeyApproval` struct) would see `undefined`, breaking phase-2 of the TOFU
+// host-key flow. `rename_all_fields` camelCases the variant fields too.
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SftpConnectResponse {
+    Connected {
+        id: ConnectionId,
+        capabilities: Capabilities,
+    },
+    HostKeyUnverified {
+        host: String,
+        port: u16,
+        fingerprint: String,
+        key_b64: String,
+        changed: bool,
+    },
+}
+
+/// Build the app-managed `known_hosts` store path under the app config dir.
+/// (Only `src-tauri` knows the path; core stays path-agnostic.)
+fn known_hosts_store(app: &tauri::AppHandle) -> Result<HostKeyStore, StorageError> {
+    let dir = app.path().app_config_dir().map_err(StorageError::other)?;
+    Ok(HostKeyStore::new(dir.join("known_hosts")))
+}
+
+/// Translate the optional frontend approval into a core [`HostKeyDecision`].
+/// `None` → phase-1 Verify; `Some` → phase-2 Trust (remember persists).
+fn host_key_decision(
+    app: &tauri::AppHandle,
+    approval: Option<HostKeyApproval>,
+) -> Result<HostKeyDecision, StorageError> {
+    Ok(match approval {
+        None => HostKeyDecision::Verify(known_hosts_store(app)?),
+        Some(a) => HostKeyDecision::Trust {
+            key_b64: a.key_b64,
+            remember: a.remember,
+            store: Some(known_hosts_store(app)?),
+        },
+    })
 }
 
 /// Register a freshly-built backend in the connection map and capture its
@@ -59,30 +127,57 @@ async fn register(state: &State<'_, AppState>, backend: Arc<dyn StorageBackend>)
     ConnectResult { id, capabilities }
 }
 
+/// Map a core [`SftpConnectOutcome`] into the frontend [`SftpConnectResponse`],
+/// registering the backend on success.
+async fn finish_sftp(
+    state: &State<'_, AppState>,
+    outcome: SftpConnectOutcome,
+) -> SftpConnectResponse {
+    match outcome {
+        SftpConnectOutcome::Connected(backend) => {
+            let r = register(state, Arc::new(backend)).await;
+            SftpConnectResponse::Connected {
+                id: r.id,
+                capabilities: r.capabilities,
+            }
+        }
+        SftpConnectOutcome::HostKeyUnverified(u) => SftpConnectResponse::HostKeyUnverified {
+            host: u.host,
+            port: u.port,
+            fingerprint: u.fingerprint,
+            key_b64: u.key_b64,
+            changed: u.changed,
+        },
+    }
+}
+
 #[tauri::command]
 pub async fn connect_sftp(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     args: SftpConnectArgs,
-) -> Result<ConnectResult, StorageError> {
+) -> Result<SftpConnectResponse, StorageError> {
     let auth = match args.auth {
         AuthSpec::Agent => SftpAuth::Agent,
         AuthSpec::KeyFile { path, passphrase } => SftpAuth::KeyFile { path, passphrase },
         AuthSpec::Password { password } => SftpAuth::Password(password),
     };
-    let backend = tokio::time::timeout(
+    let host_key = host_key_decision(&app, args.host_key)?;
+    let outcome = tokio::time::timeout(
         CONNECT_TIMEOUT,
         SftpBackend::connect(SftpConfig {
             host: args.host,
             port: args.port,
             username: args.username,
             auth,
+            host_key,
         }),
     )
     .await
     .map_err(|_| StorageError::Network {
         detail: "connection timed out".into(),
     })??;
-    Ok(register(&state, Arc::new(backend)).await)
+    Ok(finish_sftp(&state, outcome).await)
 }
 
 #[derive(Deserialize)]
@@ -367,6 +462,77 @@ pub async fn enqueue_upload(
         .await
 }
 
+/// Enqueue uploads for OS-dropped paths into `dest_dir`.
+///
+/// Dropped directories contribute their immediate file children (see
+/// `dropfiles::expand_dropped`). Each resolved local file becomes an upload to
+/// `dest_dir/<basename>` on connection `id`, reusing the same enqueue path as
+/// the toolbar Upload action. Returns the new transfer ids.
+#[tauri::command]
+pub async fn enqueue_dropped(
+    engine: State<'_, Arc<TransferEngine>>,
+    id: ConnectionId,
+    dest_dir: String,
+    paths: Vec<String>,
+) -> Result<Vec<TransferId>, StorageError> {
+    let dir = dest_dir.trim_end_matches('/');
+    let mut ids = Vec::new();
+    for local in crate::dropfiles::expand_dropped(&paths) {
+        let base = basename_of(&local);
+        let remote = if dir.is_empty() {
+            format!("/{base}")
+        } else {
+            format!("{dir}/{base}")
+        };
+        let total = tokio::fs::metadata(&local).await.ok().map(|m| m.len());
+        let new_id = engine
+            .enqueue(NewTransfer {
+                connection_id: id,
+                direction: Direction::Up,
+                name: base,
+                remote_path: remote,
+                local_path: local,
+                total_bytes: total,
+            })
+            .await?;
+        ids.push(new_id);
+    }
+    Ok(ids)
+}
+
+/// Drag-out fallback: download a remote file straight into the OS Downloads dir
+/// (no save dialog). Complements the save-dialog Download button. True deferred
+/// OS drag-out (incl. macOS file-promise drags) is post-v1; see README.
+#[tauri::command]
+pub async fn enqueue_download_to_downloads(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    engine: State<'_, Arc<TransferEngine>>,
+    id: ConnectionId,
+    remote_path: String,
+    total_bytes: Option<u64>,
+) -> Result<TransferId, StorageError> {
+    let downloads = app.path().download_dir().map_err(StorageError::other)?;
+    let local = downloads.join(basename_of(&remote_path));
+    let total = match total_bytes {
+        Some(b) => Some(b),
+        None => match state.get(id).await {
+            Ok(b) => b.stat(&remote_path).await.ok().and_then(|e| e.size),
+            Err(_) => None,
+        },
+    };
+    engine
+        .enqueue(NewTransfer {
+            connection_id: id,
+            direction: Direction::Down,
+            name: basename_of(&remote_path),
+            remote_path,
+            local_path: local.to_string_lossy().into_owned(),
+            total_bytes: total,
+        })
+        .await
+}
+
 #[tauri::command]
 pub async fn pause_transfer(
     engine: State<'_, Arc<TransferEngine>>,
@@ -493,7 +659,8 @@ pub async fn connect_bookmark(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: uuid::Uuid,
-) -> Result<ConnectResult, StorageError> {
+    #[allow(non_snake_case)] hostKey: Option<HostKeyApproval>,
+) -> Result<SftpConnectResponse, StorageError> {
     use crate::bookmarks::{AuthMethod, Protocol};
     let b = store(&app)?
         .load_all()?
@@ -504,43 +671,50 @@ pub async fn connect_bookmark(
         })?;
     let key = b.id.to_string();
 
+    // SFTP is the only protocol with a host-key step (two-phase TOFU). Handle it
+    // first and return its richer response; cloud protocols below always connect.
+    if let Protocol::Sftp = b.protocol {
+        let auth = match b.auth_method.clone().ok_or_else(|| StorageError::Other {
+            detail: "SFTP bookmark missing auth method".into(),
+        })? {
+            AuthMethod::Agent => SftpAuth::Agent,
+            AuthMethod::KeyFile { path } => {
+                let k = key.clone();
+                SftpAuth::KeyFile {
+                    path,
+                    passphrase: keychain(move || secrets::get(&k)).await?,
+                }
+            }
+            AuthMethod::Password => {
+                let k = key.clone();
+                SftpAuth::Password(keychain(move || secrets::get(&k)).await?.ok_or(
+                    StorageError::AuthFailed {
+                        detail: "no saved password".into(),
+                    },
+                )?)
+            }
+        };
+        let host_key = host_key_decision(&app, hostKey)?;
+        let outcome = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            SftpBackend::connect(SftpConfig {
+                host: b.host,
+                port: b.port,
+                username: b.username,
+                auth,
+                host_key,
+            }),
+        )
+        .await
+        .map_err(|_| StorageError::Network {
+            detail: "connection timed out".into(),
+        })??;
+        return Ok(finish_sftp(&state, outcome).await);
+    }
+
     let backend: Arc<dyn StorageBackend> = match b.protocol {
-        Protocol::Sftp => {
-            let auth = match b.auth_method.clone().ok_or_else(|| StorageError::Other {
-                detail: "SFTP bookmark missing auth method".into(),
-            })? {
-                AuthMethod::Agent => SftpAuth::Agent,
-                AuthMethod::KeyFile { path } => {
-                    let k = key.clone();
-                    SftpAuth::KeyFile {
-                        path,
-                        passphrase: keychain(move || secrets::get(&k)).await?,
-                    }
-                }
-                AuthMethod::Password => {
-                    let k = key.clone();
-                    SftpAuth::Password(keychain(move || secrets::get(&k)).await?.ok_or(
-                        StorageError::AuthFailed {
-                            detail: "no saved password".into(),
-                        },
-                    )?)
-                }
-            };
-            let backend = tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                SftpBackend::connect(SftpConfig {
-                    host: b.host,
-                    port: b.port,
-                    username: b.username,
-                    auth,
-                }),
-            )
-            .await
-            .map_err(|_| StorageError::Network {
-                detail: "connection timed out".into(),
-            })??;
-            Arc::new(backend)
-        }
+        // Handled above with an early return.
+        Protocol::Sftp => unreachable!("SFTP handled before this match"),
         Protocol::S3 => {
             let p = b.s3.ok_or_else(|| StorageError::Other {
                 detail: "S3 bookmark missing params".into(),
@@ -613,7 +787,11 @@ pub async fn connect_bookmark(
             build_onedrive_backend(&app, &key, &client_id, refresh)
         }
     };
-    Ok(register(&state, backend).await)
+    let r = register(&state, backend).await;
+    Ok(SftpConnectResponse::Connected {
+        id: r.id,
+        capabilities: r.capabilities,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -790,4 +968,44 @@ pub async fn preview_file(
             data_url: None,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression: the TOFU host-key flow round-trips `key_b64` from phase-1's
+    // `SftpConnectResponse::HostKeyUnverified` back into the camelCase
+    // `HostKeyApproval` for phase-2. `rename_all` on an internally-tagged enum
+    // renames variant NAMES only, NOT struct-variant fields — so without
+    // `rename_all_fields` the field serialized as snake_case `key_b64`, the
+    // frontend read `undefined`, and phase-2 failed with "missing field keyB64".
+    #[test]
+    fn host_key_unverified_serializes_field_as_camel_case() {
+        let resp = SftpConnectResponse::HostKeyUnverified {
+            host: "h".into(),
+            port: 22,
+            fingerprint: "SHA256:x".into(),
+            key_b64: "AAAA".into(),
+            changed: false,
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["kind"], "hostKeyUnverified");
+        assert_eq!(v["keyB64"], "AAAA", "field must be camelCase keyB64");
+        assert!(
+            v.get("key_b64").is_none(),
+            "must NOT emit snake_case key_b64"
+        );
+    }
+
+    // The approval the frontend sends back must deserialize into HostKeyApproval
+    // using the SAME camelCase key the response emitted — closing the round-trip.
+    #[test]
+    fn host_key_approval_deserializes_from_camel_case() {
+        let a: HostKeyApproval =
+            serde_json::from_value(serde_json::json!({ "keyB64": "AAAA", "remember": true }))
+                .expect("approval must deserialize from camelCase keyB64");
+        assert_eq!(a.key_b64, "AAAA");
+        assert!(a.remember);
+    }
 }

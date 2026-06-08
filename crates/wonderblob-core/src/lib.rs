@@ -1,6 +1,7 @@
 pub mod azblob;
 pub mod edit;
 pub mod error;
+pub mod hostkey;
 pub mod objstore;
 pub mod onedrive;
 pub mod s3;

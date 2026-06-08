@@ -22,24 +22,35 @@
 //! Tests skip (early-return with eprintln) when their env vars are unset, so a
 //! bare `cargo test` stays green without Docker or an agent.
 
+mod sftp_support;
+
+use sftp_support::{capture_host_key, config, connect_accept_once, PASS};
 use wonderblob_core::error::StorageError;
-use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
+use wonderblob_core::sftp::{HostKeyDecision, SftpAuth, SftpBackend, SftpConnectOutcome};
 use wonderblob_core::vfs::StorageBackend;
 
 fn enabled() -> bool {
     std::env::var("WONDERBLOB_TEST_SFTP").as_deref() == Ok("1")
 }
 
-fn config(auth: SftpAuth) -> SftpConfig {
-    SftpConfig {
-        host: "localhost".into(),
-        port: 2222,
-        username: "wb".into(),
+/// Connect with the given auth, accepting the fixture's ephemeral host key once.
+/// Returns the connect Result so auth-failure tests can assert on the error.
+/// The host-key handshake always passes (we capture the key via password first),
+/// so any error reflects the AUTH method under test, not host-key verification.
+async fn connect_auth(auth: SftpAuth) -> Result<SftpConnectOutcome, StorageError> {
+    let key_b64 = capture_host_key(SftpAuth::Password(PASS.into())).await;
+    SftpBackend::connect(config(
         auth,
-    }
+        HostKeyDecision::Trust {
+            key_b64,
+            remember: false,
+            store: None,
+        },
+    ))
+    .await
 }
 
-async fn assert_lists_home(backend: &SftpBackend) {
+async fn assert_lists_home(backend: &wonderblob_core::sftp::SftpBackend) {
     // Listing the home dir proves the SFTP channel works post-auth.
     backend.list("/config").await.expect("list home dir");
 }
@@ -54,9 +65,7 @@ async fn agent_auth_connects_and_lists() {
         eprintln!("skipped: no SSH_AUTH_SOCK (start the test agent — see module docs)");
         return;
     }
-    let backend = SftpBackend::connect(config(SftpAuth::Agent))
-        .await
-        .expect("agent auth connect");
+    let backend = connect_accept_once(SftpAuth::Agent).await;
     assert_lists_home(&backend).await;
 }
 
@@ -70,12 +79,11 @@ async fn keyfile_auth_connects_and_lists() {
         eprintln!("skipped: set WONDERBLOB_TEST_KEYFILE (see module docs)");
         return;
     };
-    let backend = SftpBackend::connect(config(SftpAuth::KeyFile {
+    let backend = connect_accept_once(SftpAuth::KeyFile {
         path,
         passphrase: None,
-    }))
-    .await
-    .expect("keyfile auth connect");
+    })
+    .await;
     assert_lists_home(&backend).await;
 }
 
@@ -89,12 +97,11 @@ async fn keyfile_auth_with_passphrase_connects_and_lists() {
         eprintln!("skipped: set WONDERBLOB_TEST_KEYFILE_PP (see module docs)");
         return;
     };
-    let backend = SftpBackend::connect(config(SftpAuth::KeyFile {
+    let backend = connect_accept_once(SftpAuth::KeyFile {
         path,
         passphrase: Some("testpass".into()),
-    }))
-    .await
-    .expect("passphrase keyfile auth connect");
+    })
+    .await;
     assert_lists_home(&backend).await;
 }
 
@@ -104,10 +111,10 @@ async fn keyfile_auth_fails_cleanly_on_missing_file() {
         eprintln!("skipped: set WONDERBLOB_TEST_SFTP=1 (see module docs)");
         return;
     }
-    let err = match SftpBackend::connect(config(SftpAuth::KeyFile {
+    let err = match connect_auth(SftpAuth::KeyFile {
         path: "/nonexistent/wonderblob_no_such_key".into(),
         passphrase: None,
-    }))
+    })
     .await
     {
         Ok(_) => panic!("missing key file must fail"),
@@ -156,7 +163,7 @@ async fn agent_auth_fails_cleanly_without_agent() {
 #[tokio::test]
 #[ignore]
 async fn agent_auth_no_agent_inner() {
-    let err = match SftpBackend::connect(config(SftpAuth::Agent)).await {
+    let err = match connect_auth(SftpAuth::Agent).await {
         Ok(_) => panic!("agent auth without an agent must fail"),
         Err(e) => e,
     };

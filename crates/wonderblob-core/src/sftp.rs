@@ -1,10 +1,11 @@
 use crate::error::{Result, StorageError};
+use crate::hostkey::{fingerprint, key_from_base64, key_to_base64, HostKeyStatus, HostKeyStore};
 use crate::vfs::{Capabilities, Entry, EntryKind, StorageBackend};
 use async_trait::async_trait;
 use russh::client;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileType, StatusCode};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWrite};
 
 pub enum SftpAuth {
@@ -17,25 +18,101 @@ pub enum SftpAuth {
     Password(String),
 }
 
+/// What to do about the server's host key on THIS connect attempt.
+///
+/// The TOFU flow is two-phase (see [`SftpBackend::connect`] /
+/// [`SftpConnectOutcome`]): phase 1 verifies against the store and rejects an
+/// unknown/changed key (capturing it for the caller to surface); phase 2 trusts
+/// the exact key the user approved.
+pub enum HostKeyDecision {
+    /// Verify against the store; unknown/changed keys are rejected and the
+    /// presented key is captured for the caller to surface (TOFU phase 1).
+    Verify(HostKeyStore),
+    /// Trust exactly this key (its base64), and remember it (persist to the
+    /// store) if `remember`. Used by the connect retry after the user approves
+    /// (TOFU phase 2), and by gated tests (`remember: false` = accept-once, for
+    /// the ephemeral fixture key — never persisted).
+    Trust {
+        key_b64: String,
+        remember: bool,
+        store: Option<HostKeyStore>,
+    },
+}
+
 pub struct SftpConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
     pub auth: SftpAuth,
+    /// How to handle the server's host key on this attempt (TOFU phases).
+    pub host_key: HostKeyDecision,
 }
 
-struct Handler;
+/// Connect could not complete because the host key is unverified — NOT an error,
+/// a decision-needed state the frontend turns into an approval dialog. The
+/// handshake was aborted before any data flowed to the (untrusted) server.
+pub struct HostKeyUnverified {
+    pub host: String,
+    pub port: u16,
+    /// `SHA256:…` display fingerprint of the presented key.
+    pub fingerprint: String,
+    /// Opaque base64 of the presented key; round-tripped into the phase-2 retry.
+    pub key_b64: String,
+    /// true => a DIFFERENT key is already recorded (MITM warning), false => first-seen.
+    pub changed: bool,
+}
+
+/// Either a connected backend or a TOFU decision-needed state.
+pub enum SftpConnectOutcome {
+    Connected(SftpBackend),
+    HostKeyUnverified(HostKeyUnverified),
+}
+
+/// The verdict the [`Handler`] enforces mid-handshake. Computed before the
+/// handshake so `check_server_key` never blocks on a browser dialog.
+enum HostKeyVerdict {
+    /// Verify the presented key against the store; capture + reject if not Known.
+    Verify(HostKeyStore),
+    /// Trust iff the presented key's base64 equals this exact approved blob.
+    Trust { key_b64: String },
+}
+
+struct Handler {
+    host: String,
+    port: u16,
+    verdict: HostKeyVerdict,
+    /// Filled with `(fingerprint, key_b64, changed)` on a verify-rejection so
+    /// `connect` can report the decision-needed state instead of a raw error.
+    captured: Arc<StdMutex<Option<(String, String, bool)>>>,
+}
 
 #[async_trait]
 impl client::Handler for Handler {
     type Error = russh::Error;
-    // v1: accept any host key; host-key verification is a tracked follow-up
-    // before any public release.
     async fn check_server_key(
         &mut self,
-        _key: &russh::keys::key::PublicKey,
+        key: &russh::keys::key::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        Ok(true)
+        let presented_b64 = key_to_base64(key);
+        match &self.verdict {
+            // Phase 2: trust ONLY the exact key the user approved.
+            HostKeyVerdict::Trust { key_b64 } => Ok(&presented_b64 == key_b64),
+            // Phase 1: classify; Known proceeds, anything else captures + rejects
+            // so no bytes ever flow to an unverified/MITM host.
+            HostKeyVerdict::Verify(store) => match store.classify(&self.host, self.port, key) {
+                Ok(HostKeyStatus::Known) => Ok(true),
+                Ok(status) => {
+                    *self.captured.lock().unwrap() = Some((
+                        fingerprint(key),
+                        presented_b64,
+                        status == HostKeyStatus::Changed,
+                    ));
+                    Ok(false)
+                }
+                // A store read error is treated as "do not trust".
+                Err(_) => Ok(false),
+            },
+        }
     }
 }
 
@@ -45,13 +122,65 @@ pub struct SftpBackend {
 }
 
 impl SftpBackend {
-    pub async fn connect(cfg: SftpConfig) -> Result<Self> {
+    pub async fn connect(cfg: SftpConfig) -> Result<SftpConnectOutcome> {
+        let captured: Arc<StdMutex<Option<(String, String, bool)>>> = Arc::new(StdMutex::new(None));
+
+        // Resolve the verdict + the (key_b64, store) to persist on a successful
+        // phase-2 remember. We never write to the store on a failed handshake.
+        let (verdict, remember): (HostKeyVerdict, Option<(String, HostKeyStore)>) =
+            match cfg.host_key {
+                HostKeyDecision::Verify(store) => (HostKeyVerdict::Verify(store), None),
+                HostKeyDecision::Trust {
+                    key_b64,
+                    remember,
+                    store,
+                } => {
+                    let to_remember = if remember {
+                        store.map(|s| (key_b64.clone(), s))
+                    } else {
+                        None
+                    };
+                    (HostKeyVerdict::Trust { key_b64 }, to_remember)
+                }
+            };
+
+        let handler = Handler {
+            host: cfg.host.clone(),
+            port: cfg.port,
+            verdict,
+            captured: captured.clone(),
+        };
+
         let config = Arc::new(client::Config::default());
-        let mut session = client::connect(config, (cfg.host.as_str(), cfg.port), Handler)
-            .await
-            .map_err(|e| StorageError::Network {
-                detail: e.to_string(),
-            })?;
+        let mut session =
+            match client::connect(config, (cfg.host.as_str(), cfg.port), handler).await {
+                Ok(s) => s,
+                Err(e) => {
+                    // A rejected host key surfaces here as a handshake error; if we
+                    // captured a key, report the decision-needed state instead.
+                    if let Some((fp, key_b64, changed)) = captured.lock().unwrap().take() {
+                        return Ok(SftpConnectOutcome::HostKeyUnverified(HostKeyUnverified {
+                            host: cfg.host,
+                            port: cfg.port,
+                            fingerprint: fp,
+                            key_b64,
+                            changed,
+                        }));
+                    }
+                    return Err(StorageError::Network {
+                        detail: e.to_string(),
+                    });
+                }
+            };
+
+        // Phase-2 trust that asked to remember: the handshake passed (so the key
+        // matched the approved blob) — persist it now. A CHANGED key is never
+        // silently updated: that path only reaches here via an explicit retry.
+        if let Some((key_b64, store)) = remember {
+            if let Ok(k) = key_from_base64(&key_b64) {
+                let _ = store.remember(&cfg.host, cfg.port, &k);
+            }
+        }
 
         let authed = match &cfg.auth {
             SftpAuth::Password(pw) => session
@@ -88,10 +217,10 @@ impl SftpBackend {
             .await
             .map_err(StorageError::other)?;
 
-        Ok(Self {
+        Ok(SftpConnectOutcome::Connected(Self {
             sftp,
             _session: session,
-        })
+        }))
     }
 }
 

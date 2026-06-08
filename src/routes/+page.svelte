@@ -1,6 +1,7 @@
 <script lang="ts">
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { api, type Bookmark, type Entry } from "$lib/api";
   import { describeError } from "$lib/errors";
   import BookmarkList from "$lib/components/BookmarkList.svelte";
@@ -28,6 +29,41 @@
   let uploading = $state(false);
 
   let transfersOpen = $state(false);
+
+  // True while OS files are dragged over the window — drives the drop highlight.
+  let dragOver = $state(false);
+
+  // Drag-in: OS file-manager drops arrive via the webview's native drag-drop
+  // event (DOM `ondrop` does NOT fire — Tauri intercepts natively; see
+  // tauri-apps/tauri#14373). The payload carries filesystem paths, which we hand
+  // to enqueue_dropped → the tested upload path, into the current directory.
+  $effect(() => {
+    const unlisten = getCurrentWebview().onDragDropEvent(async (e) => {
+      const p = e.payload;
+      if (p.type === "enter" || p.type === "over") {
+        dragOver = true;
+        return;
+      }
+      if (p.type === "leave") {
+        dragOver = false;
+        return;
+      }
+      // p.type === "drop"
+      dragOver = false;
+      const conn = $activeConnection;
+      if (!conn) return;
+      if (!p.paths || p.paths.length === 0) return;
+      try {
+        await api.enqueueDropped(conn.id, $currentPath, p.paths);
+        transfersOpen = true; // reveal progress
+      } catch (err) {
+        showToast(opError(err, "Couldn't upload dropped files"));
+      }
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  });
 
   // Start the transfers store once (reconcile + subscribe to events).
   $effect(() => {
@@ -181,6 +217,25 @@
     }
   }
 
+  // Drag-out fallback: one-click download of the selected file straight to
+  // ~/Downloads (no save dialog). Complements the save-dialog Download button.
+  async function downloadToDownloads() {
+    const conn = $activeConnection;
+    if (!conn) return;
+    const entry = fileList?.selected() ?? null;
+    if (!entry || entry.kind === "dir") {
+      showToast("Select a file to download.");
+      return;
+    }
+    try {
+      await api.enqueueDownloadToDownloads(conn.id, entry.path, entry.size ?? undefined);
+      transfersOpen = true; // reveal progress
+      showToast(`Downloading “${entry.name}” to Downloads`);
+    } catch (e) {
+      showToast(opError(e, "Couldn't start download"));
+    }
+  }
+
   async function disconnect() {
     const conn = $activeConnection;
     if (!conn) return;
@@ -216,6 +271,9 @@
             {uploading ? "Uploading…" : "Upload"}
           </button>
           <button class="ghost" onclick={download}>Download</button>
+          <button class="ghost" onclick={downloadToDownloads} title="Download to ~/Downloads">
+            To Downloads
+          </button>
           {#if $activeConnection?.capabilities.canPresign}
             <button class="ghost" onclick={shareSelected}>Share Link</button>
           {/if}
@@ -226,7 +284,7 @@
           <button class="ghost" onclick={disconnect}>Disconnect</button>
         </div>
       </div>
-      <div class="browser">
+      <div class="browser" class:drop-target={dragOver}>
         <FileList
           bind:this={fileList}
           onerror={showToast}
@@ -325,6 +383,18 @@
     outline: none;
   }
   .browser { flex: 1; overflow-y: auto; position: relative; }
+  /* Drop-target highlight while OS files are dragged over the pane. */
+  .browser.drop-target::after {
+    content: "";
+    position: absolute;
+    inset: 4px;
+    border: 2px dashed var(--accent);
+    border-radius: var(--radius);
+    background: var(--bg-selected);
+    opacity: 0.5;
+    pointer-events: none;
+    z-index: 2;
+  }
   .transfers {
     flex-shrink: 0;
     max-height: 38%;
