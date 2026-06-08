@@ -1,0 +1,27 @@
+@import "./tokens.css";
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  color: var(--fg-primary);
+  background: var(--bg-app);
+  overscroll-behavior: none;          /* no scroll-bounce */
+  -webkit-user-select: none;          /* chrome isn't selectable text */
+  user-select: none;
+  cursor: default;                    /* no text cursor on labels */
+}
+
+* { box-sizing: border-box; }
+
+button, input, select { font: inherit; color: inherit; }
+a { -webkit-user-drag: none; }
+img { -webkit-user-drag: none; pointer-events: none; }
+
+/* focus ring only for keyboard users */
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* selectable where text genuinely is content */
+.selectable { user-select: text; cursor: text; }
