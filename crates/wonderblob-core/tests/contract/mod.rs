@@ -16,7 +16,9 @@ pub async fn run_contract(b: &dyn StorageBackend, root: &str) {
     // mkdir + list shows it
     b.mkdir(&dir).await.expect("mkdir");
     let entries = b.list(root).await.expect("list root");
-    assert!(entries.iter().any(|e| e.path == dir && e.kind == EntryKind::Dir));
+    assert!(entries
+        .iter()
+        .any(|e| e.path == dir && e.kind == EntryKind::Dir));
 
     // write + read back
     let mut w = b.write(&file).await.expect("open write");
@@ -53,5 +55,8 @@ pub async fn run_contract(b: &dyn StorageBackend, root: &str) {
         b.delete(&file).await.expect("delete file");
     }
     b.delete(&dir).await.expect("delete dir");
-    assert!(matches!(b.stat(&dir).await, Err(StorageError::NotFound { .. })));
+    assert!(matches!(
+        b.stat(&dir).await,
+        Err(StorageError::NotFound { .. })
+    ));
 }

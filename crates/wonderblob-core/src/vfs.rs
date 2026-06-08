@@ -32,7 +32,11 @@ pub struct Capabilities {
 
 impl Default for Capabilities {
     fn default() -> Self {
-        Self { can_presign: false, can_rename: true, can_set_mtime: false }
+        Self {
+            can_presign: false,
+            can_rename: true,
+            can_set_mtime: false,
+        }
     }
 }
 
@@ -44,11 +48,9 @@ pub trait StorageBackend: Send + Sync {
     async fn list(&self, path: &str) -> Result<Vec<Entry>>;
     async fn stat(&self, path: &str) -> Result<Entry>;
     /// Reader over file contents starting at `offset` (ranged reads for preview/resume).
-    async fn read(&self, path: &str, offset: u64)
-        -> Result<Box<dyn AsyncRead + Send + Unpin>>;
+    async fn read(&self, path: &str, offset: u64) -> Result<Box<dyn AsyncRead + Send + Unpin>>;
     /// Writer that creates/replaces the file at `path`.
-    async fn write(&self, path: &str)
-        -> Result<Box<dyn AsyncWrite + Send + Unpin>>;
+    async fn write(&self, path: &str) -> Result<Box<dyn AsyncWrite + Send + Unpin>>;
     async fn delete(&self, path: &str) -> Result<()>;
     async fn rename(&self, from: &str, to: &str) -> Result<()>;
     async fn mkdir(&self, path: &str) -> Result<()>;

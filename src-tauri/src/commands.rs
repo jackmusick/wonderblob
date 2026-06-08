@@ -17,8 +17,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AuthSpec {
     Agent,
-    KeyFile { path: String, passphrase: Option<String> },
-    Password { password: String },
+    KeyFile {
+        path: String,
+        passphrase: Option<String>,
+    },
+    Password {
+        password: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -50,9 +55,15 @@ pub async fn connect_sftp(
         }),
     )
     .await
-    .map_err(|_| StorageError::Network { detail: "connection timed out".into() })??;
+    .map_err(|_| StorageError::Network {
+        detail: "connection timed out".into(),
+    })??;
     let id = state.next_id();
-    state.connections.write().await.insert(id, Arc::new(backend));
+    state
+        .connections
+        .write()
+        .await
+        .insert(id, Arc::new(backend));
     Ok(id)
 }
 
@@ -80,10 +91,13 @@ pub async fn download_file(
 ) -> Result<(), StorageError> {
     let b: Arc<dyn StorageBackend> = state.get(id).await?;
     let mut r = b.read(&remote_path, 0).await?;
-    let mut f =
-        tokio::fs::File::create(&local_path).await.map_err(StorageError::other)?;
+    let mut f = tokio::fs::File::create(&local_path)
+        .await
+        .map_err(StorageError::other)?;
     let result = async {
-        tokio::io::copy(&mut r, &mut f).await.map_err(StorageError::other)?;
+        tokio::io::copy(&mut r, &mut f)
+            .await
+            .map_err(StorageError::other)?;
         f.flush().await.map_err(StorageError::other)?;
         Ok(())
     }
@@ -104,12 +118,15 @@ pub async fn upload_file(
     remote_path: String,
 ) -> Result<(), StorageError> {
     let b: Arc<dyn StorageBackend> = state.get(id).await?;
-    let mut f =
-        tokio::fs::File::open(&local_path).await.map_err(StorageError::other)?;
+    let mut f = tokio::fs::File::open(&local_path)
+        .await
+        .map_err(StorageError::other)?;
     let mut w = b.write(&remote_path).await?;
     // FIXME(v1): remote partial file is left behind; TransferEngine (Plan 3)
     // replaces this whole path with resumable chunked uploads + cleanup.
-    tokio::io::copy(&mut f, &mut w).await.map_err(StorageError::other)?;
+    tokio::io::copy(&mut f, &mut w)
+        .await
+        .map_err(StorageError::other)?;
     w.shutdown().await.map_err(StorageError::other)?;
     Ok(())
 }
@@ -190,8 +207,7 @@ pub async fn bookmark_save(
         // password must not be reused as a key passphrase).  Only when the
         // method is unchanged and still secret-using do we keep the saved one.
         let method_changed = existing.as_ref().is_some_and(|e| {
-            std::mem::discriminant(&e.auth_method)
-                != std::mem::discriminant(&bookmark.auth_method)
+            std::mem::discriminant(&e.auth_method) != std::mem::discriminant(&bookmark.auth_method)
         });
         if matches!(bookmark.auth_method, AuthMethod::Agent) || method_changed {
             let k = key.clone();
@@ -227,17 +243,24 @@ pub async fn connect_bookmark(
         .load_all()?
         .into_iter()
         .find(|b| b.id == id)
-        .ok_or_else(|| StorageError::Other { detail: "bookmark not found".into() })?;
+        .ok_or_else(|| StorageError::Other {
+            detail: "bookmark not found".into(),
+        })?;
     let auth = match b.auth_method {
         AuthMethod::Agent => SftpAuth::Agent,
         AuthMethod::KeyFile { path } => {
             let key = b.id.to_string();
-            SftpAuth::KeyFile { path, passphrase: keychain(move || secrets::get(&key)).await? }
+            SftpAuth::KeyFile {
+                path,
+                passphrase: keychain(move || secrets::get(&key)).await?,
+            }
         }
         AuthMethod::Password => {
             let key = b.id.to_string();
             SftpAuth::Password(keychain(move || secrets::get(&key)).await?.ok_or(
-                StorageError::AuthFailed { detail: "no saved password".into() },
+                StorageError::AuthFailed {
+                    detail: "no saved password".into(),
+                },
             )?)
         }
     };
@@ -251,8 +274,14 @@ pub async fn connect_bookmark(
         }),
     )
     .await
-    .map_err(|_| StorageError::Network { detail: "connection timed out".into() })??;
+    .map_err(|_| StorageError::Network {
+        detail: "connection timed out".into(),
+    })??;
     let cid = state.next_id();
-    state.connections.write().await.insert(cid, Arc::new(backend));
+    state
+        .connections
+        .write()
+        .await
+        .insert(cid, Arc::new(backend));
     Ok(cid)
 }

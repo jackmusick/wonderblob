@@ -17,11 +17,7 @@ impl StorageBackend for FakeBackend {
     async fn stat(&self, path: &str) -> Result<Entry> {
         Err(StorageError::NotFound { path: path.into() })
     }
-    async fn read(
-        &self,
-        path: &str,
-        _offset: u64,
-    ) -> Result<Box<dyn AsyncRead + Send + Unpin>> {
+    async fn read(&self, path: &str, _offset: u64) -> Result<Box<dyn AsyncRead + Send + Unpin>> {
         Err(StorageError::NotFound { path: path.into() })
     }
     async fn write(&self, path: &str) -> Result<Box<dyn AsyncWrite + Send + Unpin>> {
@@ -37,6 +33,8 @@ impl StorageBackend for FakeBackend {
         Ok(())
     }
     async fn share_link(&self, _path: &str, _expiry_secs: u64) -> Result<String> {
-        Err(StorageError::Unsupported { op: "share_link".into() })
+        Err(StorageError::Unsupported {
+            op: "share_link".into(),
+        })
     }
 }

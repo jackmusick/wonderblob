@@ -75,8 +75,11 @@ impl BookmarkStore {
         std::fs::create_dir_all(&self.dir).map_err(StorageError::other)?;
         // Write-then-rename so a crash mid-write can't corrupt the file.
         let tmp = self.file_path().with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(all).map_err(StorageError::other)?)
-            .map_err(StorageError::other)?;
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec_pretty(all).map_err(StorageError::other)?,
+        )
+        .map_err(StorageError::other)?;
         std::fs::rename(&tmp, self.file_path()).map_err(StorageError::other)
     }
 }

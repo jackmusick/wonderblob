@@ -30,7 +30,9 @@ impl StorageError {
     }
 
     pub fn other(e: impl std::fmt::Display) -> Self {
-        StorageError::Other { detail: e.to_string() }
+        StorageError::Other {
+            detail: e.to_string(),
+        }
     }
 }
 
@@ -50,7 +52,13 @@ mod tests {
 
     #[test]
     fn auth_failed_is_not_retryable_but_network_is() {
-        assert!(!StorageError::AuthFailed { detail: "bad key".into() }.is_retryable());
-        assert!(StorageError::Network { detail: "reset".into() }.is_retryable());
+        assert!(!StorageError::AuthFailed {
+            detail: "bad key".into()
+        }
+        .is_retryable());
+        assert!(StorageError::Network {
+            detail: "reset".into()
+        }
+        .is_retryable());
     }
 }

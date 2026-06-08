@@ -26,7 +26,9 @@ impl AppState {
             .await
             .get(&id)
             .cloned()
-            .ok_or_else(|| StorageError::Other { detail: format!("no such connection {id}") })
+            .ok_or_else(|| StorageError::Other {
+                detail: format!("no such connection {id}"),
+            })
     }
 
     /// Remove a connection; returns true if it existed.
@@ -49,7 +51,11 @@ mod tests {
 
         // Insert a fake backend.
         let id = state.next_id();
-        state.connections.write().await.insert(id, Arc::new(FakeBackend));
+        state
+            .connections
+            .write()
+            .await
+            .insert(id, Arc::new(FakeBackend));
 
         // Now it's there.
         assert!(state.get(id).await.is_ok());

@@ -31,7 +31,12 @@ fn enabled() -> bool {
 }
 
 fn config(auth: SftpAuth) -> SftpConfig {
-    SftpConfig { host: "localhost".into(), port: 2222, username: "wb".into(), auth }
+    SftpConfig {
+        host: "localhost".into(),
+        port: 2222,
+        username: "wb".into(),
+        auth,
+    }
 }
 
 async fn assert_lists_home(backend: &SftpBackend) {
@@ -129,7 +134,12 @@ async fn agent_auth_fails_cleanly_without_agent() {
     // child process at a socket that cannot exist; env vars are process-global
     // so this runs in a subprocess rather than poisoning parallel tests.
     let out = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "agent_auth_no_agent_inner", "--ignored", "--nocapture"])
+        .args([
+            "--exact",
+            "agent_auth_no_agent_inner",
+            "--ignored",
+            "--nocapture",
+        ])
         .env("SSH_AUTH_SOCK", "/nonexistent/wonderblob_no_agent.sock")
         .output()
         .expect("spawn inner test");
