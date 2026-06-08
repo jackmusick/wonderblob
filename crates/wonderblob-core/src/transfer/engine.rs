@@ -364,13 +364,72 @@ impl TransferEngine {
         self.store.list()
     }
 
-    /// Upload streaming is implemented in Task 8.
+    /// Stream local→remote. Uploads cannot resume (header asymmetry), so this
+    /// always sends the whole file; callers reset `transferred_bytes` to 0 before
+    /// a re-run via `reset_upload_offset`.
     async fn stream_upload(
         &self,
-        _t: &Transfer,
-        _backend: &dyn StorageBackend,
-        _control: &Arc<AtomicU8>,
+        t: &Transfer,
+        backend: &dyn StorageBackend,
+        control: &Arc<AtomicU8>,
     ) -> Outcome {
-        Outcome::Failed("upload not yet implemented".into(), false)
+        let mut file = match tokio::fs::File::open(&t.local_path).await {
+            Ok(f) => f,
+            Err(e) => return Outcome::Failed(e.to_string(), false),
+        };
+        let mut writer = match backend.write(&t.remote_path).await {
+            Ok(w) => w,
+            Err(e) => return Outcome::Failed(e.to_string(), e.is_retryable()),
+        };
+        let mut transferred = 0u64;
+        let mut chunk = vec![0u8; self.cfg.chunk_bytes];
+        let mut last_emit = Instant::now();
+        let mut window_bytes = 0u64;
+        loop {
+            match control.load(Ordering::SeqCst) {
+                // Pause/cancel mid-upload: the partial remote object is invalid and
+                // a resume re-streams from 0, so treat both as their states; the
+                // writer is dropped without shutdown (multipart upload never
+                // completes → no partial object materializes for S3/Azure).
+                C_PAUSE => return Outcome::Paused,
+                C_CANCEL => return Outcome::Canceled,
+                _ => {}
+            }
+            let n = match file.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => return Outcome::Failed(e.to_string(), false),
+            };
+            if let Err(e) = writer.write_all(&chunk[..n]).await {
+                return Outcome::Failed(e.to_string(), true);
+            }
+            transferred += n as u64;
+            window_bytes += n as u64;
+            if last_emit.elapsed() >= Duration::from_millis(self.cfg.progress_interval_ms) {
+                let secs = last_emit.elapsed().as_secs_f64().max(0.001);
+                let rate = (window_bytes as f64 / secs) as u64;
+                let _ = self.store.update_progress(t.id, transferred, t.total_bytes);
+                self.sink.emit(TransferEvent::Progress(TransferUpdate {
+                    id: t.id,
+                    transferred_bytes: transferred,
+                    total_bytes: t.total_bytes,
+                    bytes_per_sec: rate,
+                }));
+                last_emit = Instant::now();
+                window_bytes = 0;
+            }
+        }
+        if let Err(e) = writer.shutdown().await {
+            // shutdown finalizes the multipart/block upload (Plan 2) → retryable.
+            return Outcome::Failed(e.to_string(), true);
+        }
+        let _ = self.store.update_progress(t.id, transferred, Some(transferred));
+        self.sink.emit(TransferEvent::Progress(TransferUpdate {
+            id: t.id,
+            transferred_bytes: transferred,
+            total_bytes: Some(transferred),
+            bytes_per_sec: 0,
+        }));
+        Outcome::Completed
     }
 }

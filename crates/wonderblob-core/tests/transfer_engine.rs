@@ -242,3 +242,63 @@ async fn cancel_stops_and_removes_partial_file() {
     // Give the cleanup a beat, then assert the partial is gone.
     settle(|| !local.exists()).await;
 }
+
+#[tokio::test]
+async fn upload_completes_and_writes_remote() {
+    let backend = Arc::new(MockBackend::new());
+    let store = Arc::new(TransferStore::open_in_memory().unwrap());
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("up.bin");
+    std::fs::write(&local, vec![3u8; 300_000]).unwrap();
+    let engine = TransferEngine::new(
+        store.clone(),
+        Arc::new(OneBackend(backend.clone())),
+        Arc::new(CollectSink::default()),
+        fast_cfg(2),
+    );
+    let id = engine
+        .enqueue(NewTransfer {
+            connection_id: 1,
+            direction: Direction::Up,
+            remote_path: "/up.bin".into(),
+            local_path: local.to_string_lossy().into(),
+            name: "up.bin".into(),
+            total_bytes: Some(300_000),
+        })
+        .await
+        .unwrap();
+    settle(|| store.get(id).unwrap().unwrap().status == TransferStatus::Completed).await;
+    assert_eq!(backend.get("/up.bin").await.unwrap().len(), 300_000);
+}
+
+#[tokio::test]
+async fn transient_download_failure_is_retried_then_succeeds() {
+    let backend = Arc::new(MockBackend::new());
+    let body: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
+    backend.put("/r.bin", body.clone()).await;
+    backend.fail_read_after(50_000); // one injected mid-stream reset
+    let store = Arc::new(TransferStore::open_in_memory().unwrap());
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("r.bin");
+    let mut cfg = fast_cfg(1);
+    cfg.backoff_base_ms = 1; // keep the test fast
+    let engine = TransferEngine::new(
+        store.clone(),
+        Arc::new(OneBackend(backend.clone())),
+        Arc::new(CollectSink::default()),
+        cfg,
+    );
+    let id = engine
+        .enqueue(NewTransfer {
+            connection_id: 1,
+            direction: Direction::Down,
+            remote_path: "/r.bin".into(),
+            local_path: local.to_string_lossy().into(),
+            name: "r.bin".into(),
+            total_bytes: Some(400_000),
+        })
+        .await
+        .unwrap();
+    settle(|| store.get(id).unwrap().unwrap().status == TransferStatus::Completed).await;
+    assert_eq!(std::fs::read(&local).unwrap(), body); // resumed past the injected fault
+}
