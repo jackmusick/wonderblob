@@ -22,5 +22,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
 wonderblob-core = { path = "../crates/wonderblob-core" }
 
