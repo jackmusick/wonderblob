@@ -163,6 +163,24 @@
     }
   }
 
+  async function download() {
+    const conn = $activeConnection;
+    if (!conn) return;
+    const entry = fileList?.selected() ?? null;
+    if (!entry || entry.kind === "dir") {
+      showToast("Select a file to download.");
+      return;
+    }
+    const dest = await save({ defaultPath: entry.name, title: "Download to…" });
+    if (!dest) return;
+    try {
+      await api.enqueueDownload(conn.id, entry.path, dest, entry.size ?? undefined);
+      transfersOpen = true; // reveal progress
+    } catch (e) {
+      showToast(opError(e, "Couldn't start download"));
+    }
+  }
+
   async function disconnect() {
     const conn = $activeConnection;
     if (!conn) return;
