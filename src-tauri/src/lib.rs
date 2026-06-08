@@ -17,8 +17,10 @@ pub fn run() {
         .manage(state::AppState::default())
         .setup(|app| {
             let conns = app.state::<state::AppState>().connections.clone();
-            let engine = transfers::init_engine(app.handle(), conns);
+            let engine = transfers::init_engine(app.handle(), conns.clone());
             app.manage(engine);
+            let edit = edit::init_edit(app.handle(), conns);
+            app.manage(edit);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -42,6 +44,10 @@ pub fn run() {
             commands::bookmark_save,
             commands::bookmark_delete,
             commands::connect_bookmark,
+            commands::open_in_editor,
+            commands::list_edit_sessions,
+            commands::close_edit_session,
+            commands::resolve_conflict,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

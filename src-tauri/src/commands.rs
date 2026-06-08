@@ -1,4 +1,5 @@
 use crate::bookmarks::{secrets, AzAuthKind, Bookmark, BookmarkStore};
+use crate::edit::{EditRegistry, EditSessionInfo, SessionId};
 use crate::state::{AppState, ConnectionId};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -154,7 +155,12 @@ pub async fn connect_azblob(
 }
 
 #[tauri::command]
-pub async fn disconnect(state: State<'_, AppState>, id: ConnectionId) -> Result<(), StorageError> {
+pub async fn disconnect(
+    state: State<'_, AppState>,
+    edit: State<'_, Arc<EditRegistry>>,
+    id: ConnectionId,
+) -> Result<(), StorageError> {
+    edit.close_connection(id, false); // drop watchers + temp for this connection
     state.remove(id).await;
     Ok(())
 }
@@ -497,4 +503,99 @@ pub async fn connect_bookmark(
         }
     };
     Ok(register(&state, backend).await)
+}
+
+// ---------------------------------------------------------------------------
+// EditSession (open / edit / save-back — see crate::edit + wonderblob_core::edit)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn open_in_editor(
+    state: State<'_, AppState>,
+    edit: State<'_, Arc<EditRegistry>>,
+    app: tauri::AppHandle,
+    id: ConnectionId,
+    path: String,
+) -> Result<SessionId, StorageError> {
+    use tauri_plugin_opener::OpenerExt;
+    // Re-open the existing session if the file is already open.
+    if let Some(existing) = edit.find(id, &path) {
+        if let Some(s) = edit.get(existing) {
+            app.opener()
+                .open_path(s.temp_path.to_string_lossy(), None::<&str>)
+                .map_err(StorageError::other)?;
+        }
+        return Ok(existing);
+    }
+    let backend = state.get(id).await?;
+    let temp = edit.temp_path_for(id, &path);
+    let baseline = wonderblob_core::edit::download_to_temp(backend.as_ref(), &path, &temp).await?;
+    let name = basename_of(&path);
+    let session_id = edit.register(id, path, name, temp.clone(), baseline)?;
+    app.opener()
+        .open_path(temp.to_string_lossy(), None::<&str>)
+        .map_err(StorageError::other)?;
+    Ok(session_id)
+}
+
+#[tauri::command]
+pub async fn list_edit_sessions(
+    edit: State<'_, Arc<EditRegistry>>,
+) -> Result<Vec<EditSessionInfo>, StorageError> {
+    Ok(edit.list())
+}
+
+#[tauri::command]
+pub async fn close_edit_session(
+    edit: State<'_, Arc<EditRegistry>>,
+    session_id: SessionId,
+    keep_temp: bool,
+) -> Result<(), StorageError> {
+    edit.close(session_id, keep_temp);
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictAction {
+    Overwrite,
+    SaveAsCopy,
+    Discard,
+}
+
+#[tauri::command]
+pub async fn resolve_conflict(
+    state: State<'_, AppState>,
+    edit: State<'_, Arc<EditRegistry>>,
+    session_id: SessionId,
+    action: ConflictAction,
+) -> Result<(), StorageError> {
+    match action {
+        ConflictAction::Overwrite => edit.force_save(session_id).await,
+        ConflictAction::Discard => edit.discard_local(session_id).await,
+        ConflictAction::SaveAsCopy => {
+            // Upload the local edits to a sibling "<name> (local copy)" path,
+            // leaving the (changed) remote untouched; then clear the conflict.
+            let session = edit.get(session_id).ok_or_else(|| StorageError::Other {
+                detail: "no such edit session".into(),
+            })?;
+            let backend = state.get(session.connection_id).await?;
+            let copy_path = sibling_copy_path(&session.remote_path);
+            wonderblob_core::edit::save_back(backend.as_ref(), &session.temp_path, &copy_path)
+                .await?;
+            edit.discard_local(session_id).await // re-baseline to the real remote
+        }
+    }
+}
+
+/// "/a/b/report.txt" → "/a/b/report (local copy).txt".
+fn sibling_copy_path(remote_path: &str) -> String {
+    let (dir, file) = match remote_path.rfind('/') {
+        Some(i) => (&remote_path[..=i], &remote_path[i + 1..]),
+        None => ("", remote_path),
+    };
+    match file.rfind('.') {
+        Some(i) if i > 0 => format!("{dir}{} (local copy){}", &file[..i], &file[i..]),
+        _ => format!("{dir}{file} (local copy)"),
+    }
 }
