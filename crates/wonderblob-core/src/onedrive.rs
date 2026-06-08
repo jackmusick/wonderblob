@@ -256,17 +256,21 @@ async fn post_token(
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         // invalid_grant => refresh token expired/revoked => re-auth required.
-        return Err(if body.contains("invalid_grant") || status.as_u16() == 400 {
-            StorageError::AuthFailed {
-                detail: format!("token endpoint {status}: {body}"),
-            }
-        } else {
-            StorageError::Network {
-                detail: format!("token endpoint {status}"),
-            }
-        });
+        return Err(
+            if body.contains("invalid_grant") || status.as_u16() == 400 {
+                StorageError::AuthFailed {
+                    detail: format!("token endpoint {status}: {body}"),
+                }
+            } else {
+                StorageError::Network {
+                    detail: format!("token endpoint {status}"),
+                }
+            },
+        );
     }
-    resp.json::<TokenResponse>().await.map_err(StorageError::other)
+    resp.json::<TokenResponse>()
+        .await
+        .map_err(StorageError::other)
 }
 
 fn net(e: reqwest::Error) -> StorageError {
@@ -812,9 +816,10 @@ impl GraphUploadWriter {
     /// Build the finalize future once all bytes are spilled and total is known.
     fn start_finalize(&mut self) -> io::Result<()> {
         // Reopen the spill file independently so the future owns a handle.
-        let tmp = self.spill.take().ok_or_else(|| {
-            io::Error::other("upload writer finalized twice".to_string())
-        })?;
+        let tmp = self
+            .spill
+            .take()
+            .ok_or_else(|| io::Error::other("upload writer finalized twice".to_string()))?;
         let file = tmp.reopen().map_err(io::Error::other)?;
         // Keep the NamedTempFile alive until the future resolves by leaking it
         // into the future via a guard-less reopen: we hold `file` (an fd) which
@@ -905,7 +910,10 @@ mod tests {
     fn encode_keeps_unreserved_and_escapes_specials() {
         assert_eq!(urlencode_segment("a b"), "a%20b");
         assert_eq!(urlencode_segment("a#b?c%d"), "a%23b%3Fc%25d");
-        assert_eq!(urlencode_segment("report-2024_final.txt"), "report-2024_final.txt");
+        assert_eq!(
+            urlencode_segment("report-2024_final.txt"),
+            "report-2024_final.txt"
+        );
     }
 
     #[test]
@@ -1075,8 +1083,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(wm_path("/me/drive/root"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"folder": {}})),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"folder": {}})),
             )
             .mount(&s)
             .await;
@@ -1240,7 +1247,10 @@ mod tests {
             })))
             .mount(&s)
             .await;
-        let url = backend(&s.uri()).share_link("/a.txt", 86_400).await.unwrap();
+        let url = backend(&s.uri())
+            .share_link("/a.txt", 86_400)
+            .await
+            .unwrap();
         assert_eq!(url, "https://contoso-my.sharepoint.com/x");
     }
 

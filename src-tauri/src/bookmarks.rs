@@ -14,7 +14,8 @@ use wonderblob_core::error::StorageError;
 pub enum Protocol {
     Sftp,
     S3,
-    AzBlob, // OneDrive etc. added in later plans
+    AzBlob,
+    OneDrive,
 }
 
 /// How to authenticate — the *method* only; secrets live in the keychain.
@@ -58,6 +59,18 @@ pub struct AzBlobParams {
     pub auth_kind: AzAuthKind,
 }
 
+/// OneDrive connection metadata. The keychain secret for a OneDrive bookmark is
+/// the OAuth **refresh token** (never user-entered), stored under the bookmark
+/// UUID like every other protocol's secret.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OneDriveParams {
+    /// Per-connection client-ID override (spec); None => DEFAULT_CLIENT_ID.
+    pub client_id_override: Option<String>,
+    /// Display label from the id_token / `/me` (email or name) — metadata only.
+    pub account_label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bookmark {
@@ -79,6 +92,8 @@ pub struct Bookmark {
     pub s3: Option<S3Params>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azblob: Option<AzBlobParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onedrive: Option<OneDriveParams>,
 }
 
 pub struct BookmarkStore {
@@ -175,6 +190,7 @@ mod tests {
             initial_path: Some("/var/www".into()),
             s3: None,
             azblob: None,
+            onedrive: None,
         };
         store.save(&b).unwrap();
         let loaded = store.load_all().unwrap();
@@ -229,6 +245,7 @@ mod tests {
                 force_path_style: true,
             }),
             azblob: None,
+            onedrive: None,
         };
         store.save(&b).unwrap();
         let loaded = store.load_all().unwrap();
@@ -240,5 +257,54 @@ mod tests {
         // No auth_method emitted for cloud bookmarks.
         let raw = std::fs::read_to_string(store.file_path()).unwrap();
         assert!(!raw.contains("authMethod"));
+    }
+
+    #[test]
+    fn onedrive_bookmark_roundtrips_with_no_token_in_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BookmarkStore::new(dir.path().to_path_buf());
+        let b = Bookmark {
+            id: uuid::Uuid::new_v4(),
+            label: "my onedrive".into(),
+            protocol: Protocol::OneDrive,
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            auth_method: None,
+            initial_path: Some("/".into()),
+            s3: None,
+            azblob: None,
+            onedrive: Some(OneDriveParams {
+                client_id_override: None,
+                account_label: Some("jack@contoso.com".into()),
+            }),
+        };
+        store.save(&b).unwrap();
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].protocol, Protocol::OneDrive);
+        let params = loaded[0].onedrive.as_ref().expect("onedrive params");
+        assert_eq!(params.account_label.as_deref(), Some("jack@contoso.com"));
+        // The refresh token lives only in the keychain, never the file.
+        let raw = std::fs::read_to_string(store.file_path()).unwrap();
+        assert!(!raw.to_lowercase().contains("refresh"));
+        assert!(!raw.contains("authMethod"));
+    }
+
+    #[test]
+    fn old_bookmark_json_deserializes_with_onedrive_none() {
+        // A pre-OneDrive bookmarks.json (s3/azblob present, no onedrive field)
+        // must still load with onedrive: None.
+        let json = r#"[{
+            "id": "22222222-2222-2222-2222-222222222222",
+            "label": "minio",
+            "protocol": "s3",
+            "initialPath": "/wbtest",
+            "s3": { "accessKeyId": "AK", "region": null, "endpoint": null, "forcePathStyle": false }
+        }]"#;
+        let parsed: Vec<Bookmark> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].onedrive.is_none());
+        assert!(parsed[0].s3.is_some());
     }
 }

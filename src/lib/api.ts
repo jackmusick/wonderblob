@@ -23,7 +23,7 @@ export type AuthMethod =
   | { type: "keyFile"; path: string }
   | { type: "password" };
 
-export type Protocol = "sftp" | "s3" | "azBlob";
+export type Protocol = "sftp" | "s3" | "azBlob" | "oneDrive";
 export type AzAuthKind = "accountKey" | "connectionString" | "sas";
 
 export interface S3Params {
@@ -36,6 +36,12 @@ export interface AzBlobParams {
   account: string;
   endpoint: string | null;
   authKind: AzAuthKind;
+}
+export interface OneDriveParams {
+  /** Per-connection client-ID override; null => the app's default. */
+  clientIdOverride: string | null;
+  /** Display label (email/name) from the id_token — metadata only. */
+  accountLabel: string | null;
 }
 
 // NOTE(Task 8): host/port/username/authMethod are SFTP-only and now optional;
@@ -52,6 +58,7 @@ export interface Bookmark {
   initialPath: string | null;
   s3?: S3Params | null;
   azblob?: AzBlobParams | null;
+  onedrive?: OneDriveParams | null;
 }
 
 /** Capabilities the connected backend exposes; mirrors core `Capabilities`. */
@@ -107,6 +114,12 @@ export interface AzBlobConnectArgs {
   authKind: AzAuthKind;
   secret: string;
 }
+/** Result of the interactive OneDrive sign-in (mirrors core `OneDriveConnectResult`). */
+export interface OneDriveConnectResult {
+  id: number;
+  capabilities: Capabilities;
+  accountLabel: string | null;
+}
 
 export type PreviewKind = "text" | "image" | "pdf" | "tooLarge" | "unsupported";
 export interface PreviewPlan {
@@ -136,6 +149,15 @@ export const api = {
     invoke<ConnectResult>("connect_sftp", { args }),
   connectS3: (args: S3ConnectArgs) => invoke<ConnectResult>("connect_s3", { args }),
   connectAzblob: (args: AzBlobConnectArgs) => invoke<ConnectResult>("connect_azblob", { args }),
+  /**
+   * Interactive OneDrive sign-in: opens the system browser, catches the
+   * `wonderblob://auth` deep-link callback, stores the refresh token in the
+   * keychain under `bookmarkId`, and registers a OneDrive backend.
+   */
+  connectOnedrive: (bookmarkId: string, clientIdOverride?: string | null) =>
+    invoke<OneDriveConnectResult>("connect_onedrive", {
+      args: { bookmarkId, clientIdOverride: clientIdOverride ?? null },
+    }),
   shareLink: (id: number, path: string, expirySecs: number) =>
     invoke<string>("share_link", { id, path, expirySecs }),
   disconnect: (id: number) => invoke<void>("disconnect", { id }),

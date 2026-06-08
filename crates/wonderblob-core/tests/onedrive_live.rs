@@ -10,9 +10,7 @@
 
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use wonderblob_core::onedrive::{
-    OneDriveBackend, OneDriveConfig, RefreshingTokenProvider,
-};
+use wonderblob_core::onedrive::{OneDriveBackend, OneDriveConfig, RefreshingTokenProvider};
 use wonderblob_core::vfs::StorageBackend;
 
 const AUTH_BASE: &str = "https://login.microsoftonline.com/organizations/oauth2/v2.0";
