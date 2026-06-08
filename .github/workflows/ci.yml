@@ -27,10 +27,11 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-      - name: SFTP contract tests
+      - name: SFTP contract + transfer resume tests
         run: |
           ./scripts/test-sftp-up.sh
           WONDERBLOB_TEST_SFTP=1 cargo test -p wonderblob-core --test sftp_contract
+          WONDERBLOB_TEST_SFTP=1 cargo test -p wonderblob-core --test transfer_sftp
           ./scripts/test-sftp-down.sh
 
       - name: SFTP agent + key-file auth tests
