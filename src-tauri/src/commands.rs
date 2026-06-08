@@ -8,9 +8,12 @@ use tauri::{Manager, State};
 use wonderblob_core::azblob::{AzAuth, AzBlobBackend, AzBlobConfig};
 use wonderblob_core::edit::{image_mime, preview_plan, PreviewPlan, PREVIEW_CAP_BYTES};
 use wonderblob_core::error::StorageError;
+use wonderblob_core::hostkey::HostKeyStore;
 use wonderblob_core::onedrive::{OneDriveBackend, OneDriveConfig, RefreshingTokenProvider};
 use wonderblob_core::s3::{S3Backend, S3Config};
-use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
+use wonderblob_core::sftp::{
+    HostKeyDecision, SftpAuth, SftpBackend, SftpConfig, SftpConnectOutcome,
+};
 use wonderblob_core::transfer::engine::TransferEngine;
 use wonderblob_core::transfer::model::{Direction, Transfer, TransferId};
 use wonderblob_core::transfer::store::NewTransfer;
@@ -40,6 +43,20 @@ pub struct SftpConnectArgs {
     pub port: u16,
     pub username: String,
     pub auth: AuthSpec,
+    /// The user's host-key decision on a retry (TOFU phase 2). `None` on the
+    /// first attempt → verify against the app `known_hosts` store (phase 1).
+    #[serde(default)]
+    pub host_key: Option<HostKeyApproval>,
+}
+
+/// The frontend's host-key decision, mirrored from `api.ts`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostKeyApproval {
+    /// Opaque base64 of the key the user approved (round-tripped from phase 1).
+    pub key_b64: String,
+    /// accept-and-remember (true, persist to `known_hosts`) vs accept-once (false).
+    pub remember: bool,
 }
 
 /// Returned by every connect command so the frontend can gate UI on capabilities.
@@ -48,6 +65,48 @@ pub struct SftpConnectArgs {
 pub struct ConnectResult {
     pub id: ConnectionId,
     pub capabilities: Capabilities,
+}
+
+/// SFTP connect result: either a live connection or a host-key decision-needed
+/// state the frontend turns into an approval dialog (TOFU). Cloud connect
+/// commands keep returning [`ConnectResult`]; only SFTP-capable paths use this.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SftpConnectResponse {
+    Connected {
+        id: ConnectionId,
+        capabilities: Capabilities,
+    },
+    HostKeyUnverified {
+        host: String,
+        port: u16,
+        fingerprint: String,
+        key_b64: String,
+        changed: bool,
+    },
+}
+
+/// Build the app-managed `known_hosts` store path under the app config dir.
+/// (Only `src-tauri` knows the path; core stays path-agnostic.)
+fn known_hosts_store(app: &tauri::AppHandle) -> Result<HostKeyStore, StorageError> {
+    let dir = app.path().app_config_dir().map_err(StorageError::other)?;
+    Ok(HostKeyStore::new(dir.join("known_hosts")))
+}
+
+/// Translate the optional frontend approval into a core [`HostKeyDecision`].
+/// `None` → phase-1 Verify; `Some` → phase-2 Trust (remember persists).
+fn host_key_decision(
+    app: &tauri::AppHandle,
+    approval: Option<HostKeyApproval>,
+) -> Result<HostKeyDecision, StorageError> {
+    Ok(match approval {
+        None => HostKeyDecision::Verify(known_hosts_store(app)?),
+        Some(a) => HostKeyDecision::Trust {
+            key_b64: a.key_b64,
+            remember: a.remember,
+            store: Some(known_hosts_store(app)?),
+        },
+    })
 }
 
 /// Register a freshly-built backend in the connection map and capture its
@@ -59,30 +118,57 @@ async fn register(state: &State<'_, AppState>, backend: Arc<dyn StorageBackend>)
     ConnectResult { id, capabilities }
 }
 
+/// Map a core [`SftpConnectOutcome`] into the frontend [`SftpConnectResponse`],
+/// registering the backend on success.
+async fn finish_sftp(
+    state: &State<'_, AppState>,
+    outcome: SftpConnectOutcome,
+) -> SftpConnectResponse {
+    match outcome {
+        SftpConnectOutcome::Connected(backend) => {
+            let r = register(state, Arc::new(backend)).await;
+            SftpConnectResponse::Connected {
+                id: r.id,
+                capabilities: r.capabilities,
+            }
+        }
+        SftpConnectOutcome::HostKeyUnverified(u) => SftpConnectResponse::HostKeyUnverified {
+            host: u.host,
+            port: u.port,
+            fingerprint: u.fingerprint,
+            key_b64: u.key_b64,
+            changed: u.changed,
+        },
+    }
+}
+
 #[tauri::command]
 pub async fn connect_sftp(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     args: SftpConnectArgs,
-) -> Result<ConnectResult, StorageError> {
+) -> Result<SftpConnectResponse, StorageError> {
     let auth = match args.auth {
         AuthSpec::Agent => SftpAuth::Agent,
         AuthSpec::KeyFile { path, passphrase } => SftpAuth::KeyFile { path, passphrase },
         AuthSpec::Password { password } => SftpAuth::Password(password),
     };
-    let backend = tokio::time::timeout(
+    let host_key = host_key_decision(&app, args.host_key)?;
+    let outcome = tokio::time::timeout(
         CONNECT_TIMEOUT,
         SftpBackend::connect(SftpConfig {
             host: args.host,
             port: args.port,
             username: args.username,
             auth,
+            host_key,
         }),
     )
     .await
     .map_err(|_| StorageError::Network {
         detail: "connection timed out".into(),
     })??;
-    Ok(register(&state, Arc::new(backend)).await)
+    Ok(finish_sftp(&state, outcome).await)
 }
 
 #[derive(Deserialize)]
@@ -493,7 +579,8 @@ pub async fn connect_bookmark(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: uuid::Uuid,
-) -> Result<ConnectResult, StorageError> {
+    #[allow(non_snake_case)] hostKey: Option<HostKeyApproval>,
+) -> Result<SftpConnectResponse, StorageError> {
     use crate::bookmarks::{AuthMethod, Protocol};
     let b = store(&app)?
         .load_all()?
@@ -504,43 +591,50 @@ pub async fn connect_bookmark(
         })?;
     let key = b.id.to_string();
 
+    // SFTP is the only protocol with a host-key step (two-phase TOFU). Handle it
+    // first and return its richer response; cloud protocols below always connect.
+    if let Protocol::Sftp = b.protocol {
+        let auth = match b.auth_method.clone().ok_or_else(|| StorageError::Other {
+            detail: "SFTP bookmark missing auth method".into(),
+        })? {
+            AuthMethod::Agent => SftpAuth::Agent,
+            AuthMethod::KeyFile { path } => {
+                let k = key.clone();
+                SftpAuth::KeyFile {
+                    path,
+                    passphrase: keychain(move || secrets::get(&k)).await?,
+                }
+            }
+            AuthMethod::Password => {
+                let k = key.clone();
+                SftpAuth::Password(keychain(move || secrets::get(&k)).await?.ok_or(
+                    StorageError::AuthFailed {
+                        detail: "no saved password".into(),
+                    },
+                )?)
+            }
+        };
+        let host_key = host_key_decision(&app, hostKey)?;
+        let outcome = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            SftpBackend::connect(SftpConfig {
+                host: b.host,
+                port: b.port,
+                username: b.username,
+                auth,
+                host_key,
+            }),
+        )
+        .await
+        .map_err(|_| StorageError::Network {
+            detail: "connection timed out".into(),
+        })??;
+        return Ok(finish_sftp(&state, outcome).await);
+    }
+
     let backend: Arc<dyn StorageBackend> = match b.protocol {
-        Protocol::Sftp => {
-            let auth = match b.auth_method.clone().ok_or_else(|| StorageError::Other {
-                detail: "SFTP bookmark missing auth method".into(),
-            })? {
-                AuthMethod::Agent => SftpAuth::Agent,
-                AuthMethod::KeyFile { path } => {
-                    let k = key.clone();
-                    SftpAuth::KeyFile {
-                        path,
-                        passphrase: keychain(move || secrets::get(&k)).await?,
-                    }
-                }
-                AuthMethod::Password => {
-                    let k = key.clone();
-                    SftpAuth::Password(keychain(move || secrets::get(&k)).await?.ok_or(
-                        StorageError::AuthFailed {
-                            detail: "no saved password".into(),
-                        },
-                    )?)
-                }
-            };
-            let backend = tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                SftpBackend::connect(SftpConfig {
-                    host: b.host,
-                    port: b.port,
-                    username: b.username,
-                    auth,
-                }),
-            )
-            .await
-            .map_err(|_| StorageError::Network {
-                detail: "connection timed out".into(),
-            })??;
-            Arc::new(backend)
-        }
+        // Handled above with an early return.
+        Protocol::Sftp => unreachable!("SFTP handled before this match"),
         Protocol::S3 => {
             let p = b.s3.ok_or_else(|| StorageError::Other {
                 detail: "S3 bookmark missing params".into(),
@@ -613,7 +707,11 @@ pub async fn connect_bookmark(
             build_onedrive_backend(&app, &key, &client_id, refresh)
         }
     };
-    Ok(register(&state, backend).await)
+    let r = register(&state, backend).await;
+    Ok(SftpConnectResponse::Connected {
+        id: r.id,
+        capabilities: r.capabilities,
+    })
 }
 
 // ---------------------------------------------------------------------------
