@@ -71,7 +71,16 @@ pub struct ConnectResult {
 /// state the frontend turns into an approval dialog (TOFU). Cloud connect
 /// commands keep returning [`ConnectResult`]; only SFTP-capable paths use this.
 #[derive(serde::Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+// `rename_all` on an enum renames the VARIANT names only — NOT the struct-variant
+// FIELDS. Without `rename_all_fields`, `key_b64` would serialize as snake_case and
+// the frontend (which reads `keyB64` and round-trips it back into the camelCase
+// `HostKeyApproval` struct) would see `undefined`, breaking phase-2 of the TOFU
+// host-key flow. `rename_all_fields` camelCases the variant fields too.
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SftpConnectResponse {
     Connected {
         id: ConnectionId,
@@ -959,4 +968,44 @@ pub async fn preview_file(
             data_url: None,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression: the TOFU host-key flow round-trips `key_b64` from phase-1's
+    // `SftpConnectResponse::HostKeyUnverified` back into the camelCase
+    // `HostKeyApproval` for phase-2. `rename_all` on an internally-tagged enum
+    // renames variant NAMES only, NOT struct-variant fields — so without
+    // `rename_all_fields` the field serialized as snake_case `key_b64`, the
+    // frontend read `undefined`, and phase-2 failed with "missing field keyB64".
+    #[test]
+    fn host_key_unverified_serializes_field_as_camel_case() {
+        let resp = SftpConnectResponse::HostKeyUnverified {
+            host: "h".into(),
+            port: 22,
+            fingerprint: "SHA256:x".into(),
+            key_b64: "AAAA".into(),
+            changed: false,
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["kind"], "hostKeyUnverified");
+        assert_eq!(v["keyB64"], "AAAA", "field must be camelCase keyB64");
+        assert!(
+            v.get("key_b64").is_none(),
+            "must NOT emit snake_case key_b64"
+        );
+    }
+
+    // The approval the frontend sends back must deserialize into HostKeyApproval
+    // using the SAME camelCase key the response emitted — closing the round-trip.
+    #[test]
+    fn host_key_approval_deserializes_from_camel_case() {
+        let a: HostKeyApproval =
+            serde_json::from_value(serde_json::json!({ "keyB64": "AAAA", "remember": true }))
+                .expect("approval must deserialize from camelCase keyB64");
+        assert_eq!(a.key_b64, "AAAA");
+        assert!(a.remember);
+    }
 }
