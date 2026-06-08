@@ -2,6 +2,8 @@
   import { untrack } from "svelte";
   import type { AuthMethod, AzAuthKind, Bookmark, Protocol } from "../api";
   import { api } from "../api";
+  import { describeError } from "../errors";
+  import { activeConnection, currentPath } from "../stores/session";
 
   let {
     bookmark = null,
@@ -39,6 +41,15 @@
   let azEndpoint = $state(initial?.azblob?.endpoint ?? "");
   let azAuthKind = $state<AzAuthKind>(initial?.azblob?.authKind ?? "accountKey");
 
+  // OneDrive (OAuth-driven; no secret field). The bookmark UUID must be stable
+  // across save + sign-in because the OAuth command stores the refresh token in
+  // the keychain keyed by this id. Editing reuses the saved id.
+  const odBookmarkId = untrack(() => initial?.id ?? crypto.randomUUID());
+  let odClientId = $state(initial?.onedrive?.clientIdOverride ?? "");
+  let odAccountLabel = $state(initial?.onedrive?.accountLabel ?? "");
+  let odAdvancedOpen = $state(!!initial?.onedrive?.clientIdOverride);
+  let signingIn = $state(false);
+
   // Single secret slot; meaning depends on protocol/auth. Never persisted locally.
   let secret = $state("");
   let saving = $state(false);
@@ -50,6 +61,7 @@
   // Reactive so switching the picker away from the saved protocol drops the hint
   // (there is no saved secret for the newly-selected protocol).
   const editingSameProto = $derived(initial != null && initial.protocol === protocol);
+  // OneDrive is OAuth-driven: no secret field renders.
   const protoUsesSecret = $derived(
     protocol === "s3" ||
       protocol === "azBlob" ||
@@ -78,6 +90,10 @@
     }
     if (protocol === "s3") {
       return s3AccessKeyId.trim().length > 0;
+    }
+    if (protocol === "oneDrive") {
+      // Sign-in is the real gate; saving metadata only needs a label.
+      return label.trim().length > 0;
     }
     // azBlob
     return azAccount.trim().length > 0;
@@ -116,6 +132,18 @@
         initialPath: initialPath.trim() || "/",
       };
     }
+    if (protocol === "oneDrive") {
+      return {
+        id,
+        label: label.trim() || "OneDrive for Business",
+        protocol: "oneDrive",
+        onedrive: {
+          clientIdOverride: odClientId.trim() || null,
+          accountLabel: odAccountLabel.trim() || null,
+        },
+        initialPath: initialPath.trim() || "/",
+      };
+    }
     return {
       id,
       label: label.trim() || azAccount.trim() || "Azure Blob",
@@ -129,11 +157,18 @@
     };
   }
 
+  function newId(): string {
+    // OneDrive reuses a stable id (refresh token is keyed by it in the keychain);
+    // other protocols mint a fresh id for a new bookmark.
+    if (protocol === "oneDrive") return odBookmarkId;
+    return bookmark?.id ?? crypto.randomUUID();
+  }
+
   async function save() {
     if (!valid() || saving) return;
     saving = true;
     error = null;
-    const b = buildBookmark(bookmark?.id ?? crypto.randomUUID());
+    const b = buildBookmark(newId());
     try {
       await api.bookmarkSave(b, secret || undefined);
       secret = ""; // clear secret from local state immediately
@@ -141,6 +176,35 @@
     } catch (e) {
       error = (e as { detail?: string })?.detail ?? "Couldn't save bookmark";
       saving = false;
+    }
+  }
+
+  // OneDrive primary action: persist the bookmark metadata FIRST (so the
+  // refresh token the OAuth command writes lands under a known UUID), then run
+  // the interactive browser sign-in, then re-save with the discovered account
+  // label and activate the connection. A cancelled / failed sign-in surfaces an
+  // error but leaves the saved bookmark in place so the user can retry.
+  async function signInWithMicrosoft() {
+    if (!valid() || signingIn) return;
+    signingIn = true;
+    error = null;
+    try {
+      // 1. Create/update the bookmark to reserve its UUID (no secret).
+      await api.bookmarkSave(buildBookmark(odBookmarkId), undefined);
+      // 2. Interactive OAuth in the system browser; backend persists the
+      //    refresh token in the keychain under odBookmarkId.
+      const res = await api.connectOnedrive(odBookmarkId, odClientId.trim() || null);
+      odAccountLabel = res.accountLabel ?? "";
+      // 3. Persist the discovered account label onto the bookmark.
+      const b = buildBookmark(odBookmarkId);
+      await api.bookmarkSave(b, undefined);
+      // 4. Activate the live connection and notify the parent.
+      activeConnection.set({ id: res.id, bookmark: b, capabilities: res.capabilities });
+      currentPath.set(b.initialPath ?? "/");
+      onsaved(b);
+    } catch (e) {
+      error = describeError(e, "list");
+      signingIn = false;
     }
   }
 
@@ -184,7 +248,8 @@
       !(e.target instanceof HTMLSelectElement)
     ) {
       e.preventDefault();
-      save();
+      if (protocol === "oneDrive") signInWithMicrosoft();
+      else save();
     }
   }
 </script>
@@ -208,6 +273,7 @@
         <option value="sftp">SFTP</option>
         <option value="s3">Amazon S3 (and compatible)</option>
         <option value="azBlob">Azure Blob Storage</option>
+        <option value="oneDrive">Microsoft OneDrive</option>
       </select>
     </label>
 
@@ -262,6 +328,27 @@
         <input type="checkbox" bind:checked={s3ForcePathStyle} />
         <span>Force path-style addressing (MinIO, most S3-compatible servers)</span>
       </label>
+    {:else if protocol === "oneDrive"}
+      {#if odAccountLabel}
+        <div class="field">
+          <span>Account</span>
+          <div class="readonly">Signed in as {odAccountLabel}</div>
+        </div>
+      {/if}
+      <button
+        type="button"
+        class="advanced-toggle"
+        aria-expanded={odAdvancedOpen}
+        onclick={() => (odAdvancedOpen = !odAdvancedOpen)}
+      >
+        {odAdvancedOpen ? "▾" : "▸"} Advanced
+      </button>
+      {#if odAdvancedOpen}
+        <label class="field">
+          <span>Custom client ID (optional — leave blank for the default)</span>
+          <input bind:value={odClientId} spellcheck="false" autocapitalize="off" placeholder="App registration GUID" />
+        </label>
+      {/if}
     {:else}
       <label class="field">
         <span>Account name</span>
@@ -290,7 +377,11 @@
 
     <label class="field">
       <span>Initial path (optional)</span>
-      <input bind:value={initialPath} placeholder={protocol === "sftp" ? "/var/www" : "/bucket"} spellcheck="false" />
+      <input
+        bind:value={initialPath}
+        placeholder={protocol === "sftp" ? "/var/www" : protocol === "oneDrive" ? "/Documents" : "/bucket"}
+        spellcheck="false"
+      />
     </label>
 
     {#if error}
@@ -299,9 +390,23 @@
 
     <div class="actions">
       <button class="ghost" onclick={onclose}>Cancel</button>
-      <button class="primary" onclick={save} disabled={!valid() || saving}>
-        {saving ? "Saving…" : "Save"}
-      </button>
+      {#if protocol === "oneDrive"}
+        <button
+          class="primary"
+          onclick={signInWithMicrosoft}
+          disabled={!valid() || signingIn}
+        >
+          {signingIn
+            ? "Signing in…"
+            : odAccountLabel
+              ? "Re-sign in"
+              : "Sign in with Microsoft"}
+        </button>
+      {:else}
+        <button class="primary" onclick={save} disabled={!valid() || saving}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+      {/if}
     </div>
   </div>
 </div>
@@ -384,6 +489,30 @@
   input:focus,
   select:focus {
     border-color: var(--accent);
+  }
+  .readonly {
+    height: 28px;
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    font-size: var(--text-base);
+    color: var(--fg-primary);
+    background: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .advanced-toggle {
+    align-self: flex-start;
+    height: auto;
+    padding: 2px 0;
+    background: transparent;
+    border: none;
+    color: var(--fg-secondary);
+    font-size: var(--text-small);
+    cursor: pointer;
+  }
+  .advanced-toggle:hover {
+    color: var(--fg-primary);
   }
   .error {
     font-size: var(--text-small);
