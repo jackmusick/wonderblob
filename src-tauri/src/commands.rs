@@ -300,11 +300,14 @@ pub async fn bookmark_save(
         // method doesn't use one (Agent) or the method changed (e.g. an old
         // password must not be reused as a key passphrase).  Only when the
         // method is unchanged and still secret-using do we keep the saved one.
-        // `auth_method` is now `Option<AuthMethod>`; comparing discriminants on
-        // the Option is correct — two cloud edits (both `None`) compare equal so
-        // the saved secret is kept.
+        // `auth_method` is now `Option<AuthMethod>`. Compare the discriminant of
+        // the INNER variant, not the Option: two cloud edits (both `None`) stay
+        // equal so the saved secret is kept, while an SFTP Password↔KeyFile switch
+        // (both `Some`, different variants) correctly reads as changed so the old
+        // password isn't silently reused as a key passphrase.
         let method_changed = existing.as_ref().is_some_and(|e| {
-            std::mem::discriminant(&e.auth_method) != std::mem::discriminant(&bookmark.auth_method)
+            e.auth_method.as_ref().map(std::mem::discriminant)
+                != bookmark.auth_method.as_ref().map(std::mem::discriminant)
         });
         // Agent (SFTP) uses no secret; cloud protocols always use one. Only wipe
         // a stale secret for Agent or when the SFTP method changed.
