@@ -221,6 +221,7 @@ fn build_onedrive_backend(
 pub async fn connect_onedrive(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    router: State<'_, crate::onedrive_auth::DeepLinkRouter>,
     args: OneDriveConnectArgs,
 ) -> Result<OneDriveConnectResult, StorageError> {
     let client_id = args
@@ -229,7 +230,7 @@ pub async fn connect_onedrive(
         .unwrap_or_else(|| crate::onedrive_auth::DEFAULT_CLIENT_ID.to_string());
     // No CONNECT_TIMEOUT: the user may take a while in the browser; the OAuth
     // module enforces its own 15-min cap.
-    let login = crate::onedrive_auth::interactive_login(&app, &client_id).await?;
+    let login = crate::onedrive_auth::interactive_login(&app, &router, &client_id).await?;
     let key = args.bookmark_id.to_string();
     let k = key.clone();
     let rt = login.refresh_token.clone();

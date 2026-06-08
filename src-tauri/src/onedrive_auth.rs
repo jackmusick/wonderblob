@@ -63,6 +63,54 @@ pub struct LoginResult {
     pub account_label: Option<String>,
 }
 
+/// Fans deep-link callback URLs out to whichever `interactive_login` is currently
+/// awaiting one. The `on_open_url` handler is registered EXACTLY ONCE (in
+/// `init_deep_link`, from setup) and broadcasts here, so repeated sign-ins don't
+/// accumulate inert closures for process life. Each login subscribes, then keeps
+/// only the URL whose `state` matches its own (stale callbacks are dropped).
+#[derive(Clone)]
+pub struct DeepLinkRouter {
+    tx: tokio::sync::broadcast::Sender<String>,
+}
+
+impl DeepLinkRouter {
+    fn new() -> Self {
+        // A small buffer is plenty — a callback is consumed near-instantly by the
+        // awaiting login; capacity only guards against a brief subscribe race.
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        Self { tx }
+    }
+
+    /// Deliver a callback URL to any awaiting login(s).
+    fn deliver(&self, url: String) {
+        let _ = self.tx.send(url);
+    }
+
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.tx.subscribe()
+    }
+}
+
+/// Install the single deep-link `on_open_url` handler (routing to a shared
+/// [`DeepLinkRouter`]) and register the custom scheme at runtime. Call once from
+/// `setup`; returns the router to `manage` in Tauri state.
+pub fn init_deep_link(app: &tauri::AppHandle) -> DeepLinkRouter {
+    let router = DeepLinkRouter::new();
+    let r = router.clone();
+    // Registered exactly once for the process lifetime.
+    app.deep_link().on_open_url(move |event| {
+        for u in event.urls() {
+            let s = u.to_string();
+            if s.starts_with(&format!("{SCHEME}://")) {
+                r.deliver(s);
+                break;
+            }
+        }
+    });
+    register_scheme(app);
+    router
+}
+
 /// Build the authorize URL (split out so it can be reasoned about / future
 /// unit-tested). `redirect_uri` and `scope` are percent-encoded.
 fn authorize_url(client_id: &str, redirect_uri: &str, challenge: &str, state: &str) -> String {
@@ -91,29 +139,17 @@ fn authorize_url(client_id: &str, redirect_uri: &str, challenge: &str, state: &s
 /// for tokens at the token endpoint. `client_id` defaults to `DEFAULT_CLIENT_ID`.
 pub async fn interactive_login(
     app: &tauri::AppHandle,
+    router: &DeepLinkRouter,
     client_id: &str,
 ) -> Result<LoginResult, StorageError> {
-    use tokio::sync::oneshot;
-
     let (verifier, challenge) = pkce();
     let state = random_urlsafe(32);
     let url = authorize_url(client_id, REDIRECT_URI, &challenge, &state);
 
-    // Subscribe to the deep-link callback BEFORE opening the browser so we can't
-    // miss a fast redirect. The plugin delivers full `wonderblob://auth?...` URLs.
-    let (tx, rx) = oneshot::channel::<String>();
-    let tx = std::sync::Mutex::new(Some(tx));
-    app.deep_link().on_open_url(move |event| {
-        for u in event.urls() {
-            let s = u.to_string();
-            if s.starts_with(REDIRECT_URI) || s.starts_with(&format!("{SCHEME}://")) {
-                if let Some(tx) = tx.lock().unwrap().take() {
-                    let _ = tx.send(s);
-                }
-                break;
-            }
-        }
-    });
+    // Subscribe to the shared router BEFORE opening the browser so we can't miss a
+    // fast redirect. The single process-wide handler broadcasts every callback;
+    // we keep only the one whose `state` matches ours (stale ones are dropped).
+    let mut rx = router.subscribe();
 
     // Open the system browser. (tauri-plugin-opener is already a dep.)
     use tauri_plugin_opener::OpenerExt;
@@ -121,22 +157,32 @@ pub async fn interactive_login(
         .open_url(url, None::<&str>)
         .map_err(StorageError::other)?;
 
-    // Await the callback (with an overall timeout).
-    let callback = tokio::time::timeout(LOGIN_TIMEOUT, rx)
-        .await
-        .map_err(|_| StorageError::Network {
-            detail: "sign-in timed out waiting for the browser redirect".into(),
-        })?
-        .map_err(|_| StorageError::AuthFailed {
-            detail: "sign-in was cancelled".into(),
-        })?;
-
-    let (code, got_state) = parse_callback(&callback)?;
-    if got_state != state {
-        return Err(StorageError::AuthFailed {
-            detail: "OAuth state mismatch (possible CSRF)".into(),
-        });
-    }
+    // Await OUR callback (matching state), bounded by the overall timeout.
+    let (code, _got_state) = tokio::time::timeout(LOGIN_TIMEOUT, async {
+        loop {
+            let callback = rx.recv().await.map_err(|_| StorageError::AuthFailed {
+                detail: "deep-link channel closed before sign-in completed".into(),
+            })?;
+            match parse_callback(&callback) {
+                Ok((code, got_state)) if got_state == state => return Ok((code, got_state)),
+                // Stale callback from a different/older login attempt — ignore and
+                // keep waiting for ours.
+                Ok(_) => continue,
+                // A malformed/error redirect carrying our flow — surface it. The
+                // OAuth `error` redirect has no `state` to match, so only surface
+                // errors (parse_callback maps `error=` to AuthFailed); other parse
+                // failures are treated as stale and skipped.
+                Err(e @ StorageError::AuthFailed { .. }) if callback.contains("error=") => {
+                    return Err(e)
+                }
+                Err(_) => continue,
+            }
+        }
+    })
+    .await
+    .map_err(|_| StorageError::Network {
+        detail: "sign-in timed out waiting for the browser redirect".into(),
+    })??;
 
     let client = reqwest::Client::new();
     let tr = wonderblob_core::onedrive::exchange_code(
@@ -161,7 +207,7 @@ pub async fn interactive_login(
 /// Register the custom scheme at runtime. On Linux the `.desktop` handler is only
 /// installed for packaged builds, so `cargo tauri dev` needs `register_all()`.
 /// Best-effort: a failure here only means deep links won't be caught in dev.
-pub fn register_scheme(app: &tauri::AppHandle) {
+fn register_scheme(app: &tauri::AppHandle) {
     #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
     {
         let _ = app.deep_link().register_all();
@@ -211,7 +257,7 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
+            b'%' if i + 3 <= bytes.len() => {
                 let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
                 if let Ok(b) = u8::from_str_radix(hex, 16) {
                     out.push(b);
@@ -289,6 +335,16 @@ mod tests {
             parse_callback("wonderblob://auth?code=abc123&state=xyz&session_state=foo").unwrap();
         assert_eq!(code, "abc123");
         assert_eq!(state, "xyz");
+    }
+
+    #[test]
+    fn percent_decode_handles_trailing_escape() {
+        // A string ending in a percent-escape must decode the final escape too.
+        assert_eq!(percent_decode("a%2Fb%2F"), "a/b/");
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+        assert_eq!(percent_decode("plus+sign"), "plus sign");
+        // A dangling/short escape at the very end is passed through literally.
+        assert_eq!(percent_decode("oops%2"), "oops%2");
     }
 
     #[test]

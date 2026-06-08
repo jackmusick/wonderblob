@@ -23,9 +23,12 @@ pub fn run() {
             app.manage(engine);
             let edit = edit::init_edit(app.handle(), conns);
             app.manage(edit);
-            // Register the `wonderblob://` custom scheme so the OneDrive OAuth
-            // deep-link callback is delivered (needed for `tauri dev` on Linux).
-            onedrive_auth::register_scheme(app.handle());
+            // Install the single deep-link handler + register the `wonderblob://`
+            // custom scheme so the OneDrive OAuth callback is delivered (needed
+            // for `tauri dev` on Linux). The router fans callbacks out to the
+            // active sign-in.
+            let router = onedrive_auth::init_deep_link(app.handle());
+            app.manage(router);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

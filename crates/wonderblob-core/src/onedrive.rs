@@ -175,8 +175,11 @@ impl TokenProvider for RefreshingTokenProvider {
                 st.refresh_token = new_rt;
             }
         }
-        // Refresh 60s early to avoid edge-of-expiry 401s.
-        let ttl = Duration::from_secs((r.expires_in.max(60) as u64).saturating_sub(60));
+        // Refresh 60s early to avoid edge-of-expiry 401s, but always keep a sane
+        // minimum cache window so a (theoretical) tiny `expires_in` can't drive a
+        // refresh on every call. Graph returns ~3600 in practice.
+        let ttl_secs = (r.expires_in.max(0) as u64).saturating_sub(60).max(30);
+        let ttl = Duration::from_secs(ttl_secs);
         st.access = Some((r.access_token.clone(), Instant::now() + ttl));
         Ok(r.access_token)
     }
