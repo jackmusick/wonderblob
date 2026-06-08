@@ -8,7 +8,9 @@ tokio = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+russh = "0.46"
+russh-sftp = "2"
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

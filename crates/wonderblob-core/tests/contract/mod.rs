@@ -8,6 +8,11 @@ pub async fn run_contract(b: &dyn StorageBackend, root: &str) {
     let file = format!("{dir}/hello.txt");
     let renamed = format!("{dir}/hello-renamed.txt");
 
+    // idempotent pre-clean so reruns after a crash don't fail on mkdir
+    let _ = b.delete(&file).await;
+    let _ = b.delete(&renamed).await;
+    let _ = b.delete(&dir).await;
+
     // mkdir + list shows it
     b.mkdir(&dir).await.expect("mkdir");
     let entries = b.list(root).await.expect("list root");
@@ -40,6 +45,9 @@ pub async fn run_contract(b: &dyn StorageBackend, root: &str) {
             b.stat(&file).await,
             Err(StorageError::NotFound { .. })
         ));
+        // verify the rename actually moved the file to the new path
+        let moved = b.stat(&renamed).await.expect("stat renamed");
+        assert_eq!(moved.kind, EntryKind::File);
         b.delete(&renamed).await.expect("delete file");
     } else {
         b.delete(&file).await.expect("delete file");
