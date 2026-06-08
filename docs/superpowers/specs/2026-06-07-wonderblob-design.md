@@ -26,6 +26,21 @@ Native window conventions, real context menus, platform keyboard shortcuts,
 desktop information density, no scroll-bounce, no text cursor on labels, no
 web-framework visual identity.
 
+**Design language — 1Password 8 is the reference.** Concretely:
+
+- Left sidebar (connections/bookmarks) + main content pane + detail/inspector,
+  with a unified toolbar row; no web-style top nav or hero spacing
+- Compact desktop density: ~28–32px list rows, 13px base type using the
+  platform font stack (system-ui → Cantarell/Segoe UI/SF)
+- Subdued, mostly-neutral palette with one restrained accent; first-class
+  dark mode following the OS preference
+- Real interactions: full keyboard navigation (arrows, type-ahead select,
+  Enter/space semantics), native context menus via Tauri, drag targets with
+  proper hover states, focus rings only on keyboard focus
+- Disable webview tells globally: text selection on chrome, overscroll,
+  pinch-zoom, right-click default menu, link cursors on buttons
+- Motion is minimal and functional (≤150ms fades/slides), never decorative
+
 ## Architecture
 
 ```
