@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeError } from "./errors";
+import { describeError, errorDetail } from "./errors";
 import type { StorageError } from "./api";
 
 function err(kind: StorageError["kind"], detail?: string): StorageError {
@@ -31,4 +31,19 @@ describe("describeError – mutate context", () => {
     ));
   it("other falls back to generic mutate message", () =>
     expect(describeError(err("other"), "mutate")).toContain("Operation failed."));
+});
+
+describe("errorDetail", () => {
+  it("reads the detail field", () =>
+    expect(errorDetail({ kind: "other", detail: "boom" })).toBe("boom"));
+  it("reads path when there is no detail (notFound)", () =>
+    expect(errorDetail({ kind: "notFound", path: "/wbtest" })).toBe("/wbtest"));
+  it("reads op for unsupported", () =>
+    expect(errorDetail({ kind: "unsupported", op: "share_link" })).toBe("share_link"));
+  it("never yields [object Object] for a fieldless error", () =>
+    expect(errorDetail({ kind: "quotaExceeded" })).toBe(""));
+  it("returns empty for null/undefined", () => {
+    expect(errorDetail(null)).toBe("");
+    expect(errorDetail(undefined)).toBe("");
+  });
 });
