@@ -1,8 +1,14 @@
-use crate::transfer::model::{Transfer, TransferId};
+use crate::transfer::model::{Direction, Transfer, TransferId, TransferStatus};
+use crate::transfer::store::{NewTransfer, TransferStore};
 use crate::vfs::StorageBackend;
 use async_trait::async_trait;
 use serde::Serialize;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 
 /// Resolves a live connection id to its backend. The app layer implements this
 /// over `AppState`'s connection map; tests implement it over a `MockBackend`.
@@ -69,7 +75,7 @@ impl Default for EngineConfig {
 }
 
 /// Outcome of one streaming attempt, so the worker loop can decide retry vs stop.
-pub(crate) enum Outcome {
+enum Outcome {
     Completed,
     Paused,
     Canceled,
@@ -77,5 +83,227 @@ pub(crate) enum Outcome {
     Failed(String, bool),
 }
 
-// `TransferEngine` and its worker logic are implemented in Task 5.
-pub struct TransferEngine;
+// Per-transfer cooperative control flag, checked between chunks.
+const C_RUN: u8 = 0;
+const C_PAUSE: u8 = 1;
+const C_CANCEL: u8 = 2;
+
+/// Persistent, resumable transfer queue. Owns the store, the injected resolver
+/// and sink, a `Semaphore` capping concurrent workers, and a per-transfer
+/// control flag map so pause/cancel can interrupt a running stream.
+pub struct TransferEngine {
+    store: Arc<TransferStore>,
+    resolver: Arc<dyn BackendResolver>,
+    sink: Arc<dyn EventSink>,
+    cfg: EngineConfig,
+    permits: Arc<Semaphore>,
+    controls: Arc<Mutex<HashMap<TransferId, Arc<AtomicU8>>>>,
+}
+
+impl TransferEngine {
+    pub fn new(
+        store: Arc<TransferStore>,
+        resolver: Arc<dyn BackendResolver>,
+        sink: Arc<dyn EventSink>,
+        cfg: EngineConfig,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            permits: Arc::new(Semaphore::new(cfg.max_workers)),
+            store,
+            resolver,
+            sink,
+            cfg,
+            controls: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    fn emit_state(&self, id: TransferId) {
+        if let Ok(Some(t)) = self.store.get(id) {
+            self.sink.emit(TransferEvent::State(t));
+        }
+    }
+
+    /// Insert a queued transfer and spawn its worker task. Returns the new id.
+    pub async fn enqueue(self: &Arc<Self>, new: NewTransfer) -> crate::error::Result<TransferId> {
+        let id = self.store.insert(new)?;
+        self.emit_state(id);
+        self.clone().spawn(id);
+        Ok(id)
+    }
+
+    /// Re-enqueue an existing (paused/failed/restart-loaded) transfer.
+    pub fn spawn(self: Arc<Self>, id: TransferId) {
+        tokio::spawn(async move {
+            // Mark queued so the UI shows it waiting for a worker slot.
+            let _ = self.store.set_status(id, TransferStatus::Queued, None);
+            self.emit_state(id);
+            let permit = self
+                .permits
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore");
+            let control = Arc::new(AtomicU8::new(C_RUN));
+            self.controls.lock().unwrap().insert(id, control.clone());
+            self.run_transfer(id, control).await;
+            self.controls.lock().unwrap().remove(&id);
+            drop(permit);
+        });
+    }
+
+    async fn run_transfer(self: &Arc<Self>, id: TransferId, control: Arc<AtomicU8>) {
+        let mut attempt = 0u32;
+        loop {
+            let t = match self.store.get(id) {
+                Ok(Some(t)) => t,
+                _ => return,
+            };
+            // Resolve the backend; if the connection is gone, park as paused.
+            let Some(backend) = self.resolver.resolve(t.connection_id).await else {
+                let _ = self.store.set_status(
+                    id,
+                    TransferStatus::Paused,
+                    Some("connection not available; reconnect to resume"),
+                );
+                self.emit_state(id);
+                return;
+            };
+            let _ = self.store.set_status(id, TransferStatus::Running, None);
+            self.emit_state(id);
+
+            let outcome = match t.direction {
+                Direction::Down => self.stream_download(&t, backend.as_ref(), &control).await,
+                Direction::Up => self.stream_upload(&t, backend.as_ref(), &control).await,
+            };
+            match outcome {
+                Outcome::Completed => {
+                    let _ = self.store.set_status(id, TransferStatus::Completed, None);
+                    self.emit_state(id);
+                    return;
+                }
+                Outcome::Paused => {
+                    let _ = self.store.set_status(id, TransferStatus::Paused, None);
+                    self.emit_state(id);
+                    return;
+                }
+                Outcome::Canceled => {
+                    // Belt-and-suspenders: also remove the partial download here so
+                    // the artifact is gone even if cancel()'s remove raced an
+                    // in-flight chunk flush.
+                    if t.direction == Direction::Down {
+                        let _ = tokio::fs::remove_file(&t.local_path).await;
+                    }
+                    let _ = self.store.set_status(id, TransferStatus::Canceled, None);
+                    self.emit_state(id);
+                    return;
+                }
+                Outcome::Failed(msg, retryable) => {
+                    if retryable && attempt < self.cfg.max_retries {
+                        let backoff =
+                            (self.cfg.backoff_base_ms << attempt).min(self.cfg.backoff_cap_ms);
+                        attempt += 1;
+                        // Uploads can't resume — rewind before re-streaming.
+                        if t.direction == Direction::Up {
+                            let _ = self.store.reset_upload_offset(id);
+                        }
+                        tokio::time::sleep(Duration::from_millis(backoff)).await;
+                        continue; // loop re-reads transferred_bytes → download resumes from offset
+                    }
+                    let _ = self.store.set_status(id, TransferStatus::Failed, Some(&msg));
+                    self.emit_state(id);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Stream remote→local, appending from `transferred_bytes` (resume offset).
+    async fn stream_download(
+        &self,
+        t: &Transfer,
+        backend: &dyn StorageBackend,
+        control: &Arc<AtomicU8>,
+    ) -> Outcome {
+        use std::io::SeekFrom;
+        let offset = t.transferred_bytes;
+        let mut reader = match backend.read(&t.remote_path, offset).await {
+            Ok(r) => r,
+            Err(e) => return Outcome::Failed(e.to_string(), e.is_retryable()),
+        };
+        // Open the partial file, append (truncate to offset for safety).
+        let mut file = match tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&t.local_path)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => return Outcome::Failed(e.to_string(), false),
+        };
+        if let Err(e) = tokio::io::AsyncSeekExt::seek(&mut file, SeekFrom::Start(offset)).await {
+            return Outcome::Failed(e.to_string(), false);
+        }
+        let _ = file.set_len(offset).await; // drop any bytes past the resume point
+
+        let mut transferred = offset;
+        let mut chunk = vec![0u8; self.cfg.chunk_bytes];
+        let mut last_emit = Instant::now();
+        let mut window_bytes = 0u64;
+        loop {
+            match control.load(Ordering::SeqCst) {
+                C_PAUSE => return Outcome::Paused,
+                C_CANCEL => return Outcome::Canceled,
+                _ => {}
+            }
+            let n = match reader.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = file.flush().await;
+                    // io errors here are transient network resets → retryable.
+                    return Outcome::Failed(e.to_string(), true);
+                }
+            };
+            if let Err(e) = file.write_all(&chunk[..n]).await {
+                return Outcome::Failed(e.to_string(), false);
+            }
+            transferred += n as u64;
+            window_bytes += n as u64;
+            if last_emit.elapsed() >= Duration::from_millis(self.cfg.progress_interval_ms) {
+                let secs = last_emit.elapsed().as_secs_f64().max(0.001);
+                let rate = (window_bytes as f64 / secs) as u64;
+                let _ = self.store.update_progress(t.id, transferred, t.total_bytes);
+                self.sink.emit(TransferEvent::Progress(TransferUpdate {
+                    id: t.id,
+                    transferred_bytes: transferred,
+                    total_bytes: t.total_bytes,
+                    bytes_per_sec: rate,
+                }));
+                last_emit = Instant::now();
+                window_bytes = 0;
+            }
+        }
+        if let Err(e) = file.flush().await {
+            return Outcome::Failed(e.to_string(), false);
+        }
+        let _ = self.store.update_progress(t.id, transferred, Some(transferred));
+        self.sink.emit(TransferEvent::Progress(TransferUpdate {
+            id: t.id,
+            transferred_bytes: transferred,
+            total_bytes: Some(transferred),
+            bytes_per_sec: 0,
+        }));
+        Outcome::Completed
+    }
+
+    /// Upload streaming is implemented in Task 8.
+    async fn stream_upload(
+        &self,
+        _t: &Transfer,
+        _backend: &dyn StorageBackend,
+        _control: &Arc<AtomicU8>,
+    ) -> Outcome {
+        Outcome::Failed("upload not yet implemented".into(), false)
+    }
+}

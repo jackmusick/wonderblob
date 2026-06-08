@@ -2,11 +2,13 @@ use crate::error::{Result, StorageError};
 use crate::vfs::{Capabilities, Entry, EntryKind, StorageBackend};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[derive(Clone)]
@@ -16,6 +18,9 @@ pub struct MockBackend {
     fail_read_after: Arc<AtomicI64>,
     /// Network up/down toggle: when false, read/write open() returns Network err.
     online: Arc<AtomicBool>,
+    /// Per-`poll_read` delay (ms); makes a transfer observably in-flight so tests
+    /// can catch the `Running` state / pause mid-stream. 0 = no delay.
+    read_delay_ms: Arc<AtomicU64>,
 }
 
 impl Default for MockBackend {
@@ -30,6 +35,7 @@ impl MockBackend {
             files: Arc::new(Mutex::new(HashMap::new())),
             fail_read_after: Arc::new(AtomicI64::new(-1)),
             online: Arc::new(AtomicBool::new(true)),
+            read_delay_ms: Arc::new(AtomicU64::new(0)),
         }
     }
     pub async fn put(&self, path: &str, bytes: Vec<u8>) {
@@ -45,6 +51,11 @@ impl MockBackend {
     pub fn set_online(&self, up: bool) {
         self.online.store(up, Ordering::SeqCst);
     }
+    /// Make each `poll_read` wait `ms` before serving a chunk, so a transfer is
+    /// observably in-flight (catch `Running`, pause mid-stream).
+    pub fn set_read_delay_ms(&self, ms: u64) {
+        self.read_delay_ms.store(ms, Ordering::SeqCst);
+    }
 }
 
 struct MockReader {
@@ -53,14 +64,27 @@ struct MockReader {
     /// Remaining bytes before the armed failure fires; -1 disarmed.
     fail_after: Arc<AtomicI64>,
     served: usize,
+    delay_ms: u64,
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl AsyncRead for MockReader {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        // Per-chunk delay: makes the stream observably slow for tests.
+        if self.delay_ms > 0 && self.pos < self.data.len() {
+            if self.sleep.is_none() {
+                let d = self.delay_ms;
+                self.sleep = Some(Box::pin(tokio::time::sleep(Duration::from_millis(d))));
+            }
+            match self.sleep.as_mut().unwrap().as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => self.sleep = None,
+            }
+        }
         let threshold = self.fail_after.load(Ordering::SeqCst);
         if threshold >= 0 && self.served as i64 >= threshold {
             self.fail_after.store(-1, Ordering::SeqCst); // disarm: retry succeeds
@@ -156,6 +180,8 @@ impl StorageBackend for MockBackend {
             pos: 0,
             fail_after: self.fail_read_after.clone(),
             served: 0,
+            delay_ms: self.read_delay_ms.load(Ordering::SeqCst),
+            sleep: None,
         }))
     }
     async fn write(&self, path: &str) -> Result<Box<dyn AsyncWrite + Send + Unpin>> {
