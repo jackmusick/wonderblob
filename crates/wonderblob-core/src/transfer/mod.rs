@@ -3,3 +3,4 @@
 //! injects a `BackendResolver` and an `EventSink`.
 
 pub mod model;
+pub mod store;
