@@ -74,6 +74,31 @@ export interface ConnectResult {
   capabilities: Capabilities;
 }
 
+/** The user's host-key decision on a TOFU retry (mirrors core `HostKeyApproval`). */
+export interface HostKeyApproval {
+  /** Opaque base64 of the approved key, round-tripped from the unverified result. */
+  keyB64: string;
+  /** accept-and-remember (true, persists to known_hosts) vs accept-once (false). */
+  remember: boolean;
+}
+
+/**
+ * SFTP connect result: either a live connection or a host-key decision-needed
+ * state (TOFU). The frontend narrows on `kind`; only SFTP-capable paths
+ * (`connect_sftp`, SFTP `connect_bookmark`) return this — cloud paths return
+ * `ConnectResult`.
+ */
+export type SftpConnectResponse =
+  | { kind: "connected"; id: number; capabilities: Capabilities }
+  | {
+      kind: "hostKeyUnverified";
+      host: string;
+      port: number;
+      fingerprint: string;
+      keyB64: string;
+      changed: boolean;
+    };
+
 export type TransferDirection = "up" | "down";
 export type TransferStatus =
   | "queued" | "running" | "paused" | "completed" | "failed" | "canceled";
@@ -145,8 +170,10 @@ export interface EditSessionInfo {
 export type ConflictAction = "overwrite" | "saveAsCopy" | "discard";
 
 export const api = {
-  connectSftp: (args: { host: string; port: number; username: string; auth: AuthSpec }) =>
-    invoke<ConnectResult>("connect_sftp", { args }),
+  connectSftp: (
+    args: { host: string; port: number; username: string; auth: AuthSpec },
+    hostKey?: HostKeyApproval,
+  ) => invoke<SftpConnectResponse>("connect_sftp", { args: { ...args, hostKey: hostKey ?? null } }),
   connectS3: (args: S3ConnectArgs) => invoke<ConnectResult>("connect_s3", { args }),
   connectAzblob: (args: AzBlobConnectArgs) => invoke<ConnectResult>("connect_azblob", { args }),
   /**
@@ -180,7 +207,8 @@ export const api = {
   bookmarkSave: (bookmark: Bookmark, secret?: string) =>
     invoke<void>("bookmark_save", { bookmark, secret }),
   bookmarkDelete: (id: string) => invoke<void>("bookmark_delete", { id }),
-  connectBookmark: (id: string) => invoke<ConnectResult>("connect_bookmark", { id }),
+  connectBookmark: (id: string, hostKey?: HostKeyApproval) =>
+    invoke<SftpConnectResponse>("connect_bookmark", { id, hostKey: hostKey ?? null }),
   openInEditor: (id: number, path: string) =>
     invoke<number>("open_in_editor", { id, path }),
   listEditSessions: () => invoke<EditSessionInfo[]>("list_edit_sessions"),

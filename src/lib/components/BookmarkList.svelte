@@ -1,6 +1,13 @@
 <script lang="ts">
-  import { api, type Bookmark, type StorageError } from "../api";
+  import {
+    api,
+    type Bookmark,
+    type StorageError,
+    type HostKeyApproval,
+    type SftpConnectResponse,
+  } from "../api";
   import { activeConnection, currentPath } from "../stores/session";
+  import HostKeyDialog from "./HostKeyDialog.svelte";
 
   let {
     onnew,
@@ -67,13 +74,43 @@
     }
   }
 
+  // Host-key approval dialog state. When an SFTP connect returns
+  // `hostKeyUnverified`, we stash the details + a resolver here and await the
+  // user's choice (accept-and-remember / accept-once / cancel) before retrying.
+  type HostKeyUnverified = Extract<SftpConnectResponse, { kind: "hostKeyUnverified" }>;
+  let hostKeyPrompt = $state<HostKeyUnverified | null>(null);
+  let hostKeyResolve: ((approval: HostKeyApproval | null) => void) | null = null;
+
+  function showHostKeyDialog(u: HostKeyUnverified): Promise<HostKeyApproval | null> {
+    hostKeyPrompt = u;
+    return new Promise((resolve) => {
+      hostKeyResolve = resolve;
+    });
+  }
+
+  function resolveHostKey(approval: HostKeyApproval | null) {
+    const r = hostKeyResolve;
+    hostKeyPrompt = null;
+    hostKeyResolve = null;
+    r?.(approval);
+  }
+
   async function connect(b: Bookmark) {
     if (connectingId) return;
     connectingId = b.id;
     const { [b.id]: _, ...rest } = errors;
     errors = rest;
     try {
-      const res = await api.connectBookmark(b.id);
+      let res = await api.connectBookmark(b.id);
+      // Two-phase TOFU: an unverified SFTP host key opens the approval dialog,
+      // then we retry once carrying the user's decision. Cloud bookmarks never
+      // return `hostKeyUnverified`, so this branch is SFTP-only.
+      if (res.kind === "hostKeyUnverified") {
+        const approval = await showHostKeyDialog(res);
+        if (!approval) return; // cancelled — abort quietly
+        res = await api.connectBookmark(b.id, approval);
+      }
+      if (res.kind !== "connected") return;
       activeConnection.set({ id: res.id, bookmark: b, capabilities: res.capabilities });
       currentPath.set(b.initialPath ?? "/");
     } catch (e) {
@@ -194,6 +231,18 @@
     </div>
   {/each}
 </div>
+
+{#if hostKeyPrompt}
+  <HostKeyDialog
+    host={hostKeyPrompt.host}
+    port={hostKeyPrompt.port}
+    fingerprint={hostKeyPrompt.fingerprint}
+    changed={hostKeyPrompt.changed}
+    onaccept={(remember) =>
+      resolveHostKey({ keyB64: hostKeyPrompt!.keyB64, remember })}
+    oncancel={() => resolveHostKey(null)}
+  />
+{/if}
 
 <style>
   .section-header {
