@@ -3,8 +3,15 @@
   import { describeError, errorDetail } from "../errors";
   import { formatMtime, formatSize } from "../format";
   import { activeConnection, currentPath } from "../stores/session";
+  import { editPaths } from "../stores/edit";
 
-  let { onerror }: { onerror?: (message: string) => void } = $props();
+  let {
+    onerror,
+    onpreview,
+  }: { onerror?: (message: string) => void; onpreview?: (entry: Entry) => void } = $props();
+
+  // Transient "Opening…" hint while an EditSession download is in flight.
+  let opening = $state(false);
 
   let entries = $state<Entry[]>([]);
   let selectedIndex = $state(-1);
@@ -112,12 +119,26 @@
     return idx <= 0 ? "/" : trimmed.slice(0, idx);
   }
 
-  function open(entry: Entry) {
+  async function open(entry: Entry) {
     if (entry.kind === "dir") {
       currentPath.set(entry.path);
-    } else {
-      console.info("open: EditSession in Plan 4");
+      return;
     }
+    const conn = $activeConnection;
+    if (!conn) return;
+    opening = true;
+    try {
+      await api.openInEditor(conn.id, entry.path); // download → OS default app → watch
+    } catch (e) {
+      onerror?.(describeError(e, "mutate"));
+    } finally {
+      opening = false;
+    }
+  }
+
+  /** Open-in-editor entry point reused by the preview overlay's fallback button. */
+  export function openEntry(entry: Entry) {
+    open(entry);
   }
 
   function scrollSelectedIntoView() {
@@ -213,6 +234,12 @@
       startRename(selected);
     } else if (e.key === "Escape") {
       cancelConfirm();
+    } else if (e.key === " " && typeahead === "" && selected && selected.kind !== "dir") {
+      // Space previews the selected file ONLY when the type-ahead buffer is empty.
+      // With a non-empty buffer (or a dir selected) Space falls through to the
+      // catch-all below so names containing spaces still type-ahead.
+      e.preventDefault();
+      onpreview?.(selected);
     } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       handleTypeahead(e.key);
@@ -241,7 +268,7 @@
   onkeydown={onkeydown}
 >
   <div class="header" role="presentation">
-    <span class="col-name">Name</span>
+    <span class="col-name">Name{#if opening}<span class="opening">· Opening…</span>{/if}</span>
     <span class="col-size">Size</span>
     <span class="col-mtime">Modified</span>
   </div>
@@ -290,6 +317,9 @@
             />
           {:else}
             <span class="name" title={entry.name}>{entry.name}</span>
+          {/if}
+          {#if $editPaths.has(entry.path)}
+            <span class="editing-dot" title="Open for editing" aria-label="Open for editing"></span>
           {/if}
           {#if confirmingDeletePath === entry.path}
             <span class="confirm">Delete? Press again to confirm</span>
@@ -396,6 +426,17 @@
     flex-shrink: 0;
     font-size: var(--text-small);
     color: var(--danger);
+  }
+  .editing-dot {
+    flex-shrink: 0;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .opening {
+    margin-left: 6px;
+    color: var(--accent);
   }
   .state {
     flex: 1;
