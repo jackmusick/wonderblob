@@ -3,7 +3,7 @@ use crate::transfer::store::{NewTransfer, TransferStore};
 use crate::vfs::StorageBackend;
 use async_trait::async_trait;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -88,6 +88,23 @@ const C_RUN: u8 = 0;
 const C_PAUSE: u8 = 1;
 const C_CANCEL: u8 = 2;
 
+/// Clears a transfer's in-flight + control-flag registration on *every* worker
+/// exit path — completion, pause, cancel, error, and panic-unwind (via `Drop`).
+/// This is what makes the double-spawn guard sound: a second `spawn` for an
+/// already-active id is rejected while exactly one worker holds the slot.
+struct InflightGuard {
+    inflight: Arc<Mutex<HashSet<TransferId>>>,
+    controls: Arc<Mutex<HashMap<TransferId, Arc<AtomicU8>>>>,
+    id: TransferId,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.inflight.lock().unwrap().remove(&self.id);
+        self.controls.lock().unwrap().remove(&self.id);
+    }
+}
+
 /// Persistent, resumable transfer queue. Owns the store, the injected resolver
 /// and sink, a `Semaphore` capping concurrent workers, and a per-transfer
 /// control flag map so pause/cancel can interrupt a running stream.
@@ -98,6 +115,9 @@ pub struct TransferEngine {
     cfg: EngineConfig,
     permits: Arc<Semaphore>,
     controls: Arc<Mutex<HashMap<TransferId, Arc<AtomicU8>>>>,
+    /// Ids with a live worker; the double-spawn guard. An id is inserted before
+    /// the semaphore permit is acquired and removed by `InflightGuard::drop`.
+    inflight: Arc<Mutex<HashSet<TransferId>>>,
 }
 
 impl TransferEngine {
@@ -114,7 +134,14 @@ impl TransferEngine {
             sink,
             cfg,
             controls: Arc::new(Mutex::new(HashMap::new())),
+            inflight: Arc::new(Mutex::new(HashSet::new())),
         })
+    }
+
+    /// True if a worker for `id` is currently registered (waiting for a slot or
+    /// actively streaming).
+    pub fn is_active(&self, id: TransferId) -> bool {
+        self.inflight.lock().unwrap().contains(&id)
     }
 
     fn emit_state(&self, id: TransferId) {
@@ -131,9 +158,28 @@ impl TransferEngine {
         Ok(id)
     }
 
-    /// Re-enqueue an existing (paused/failed/restart-loaded) transfer.
+    /// Re-enqueue an existing (paused/failed/restart-loaded) transfer. A no-op if
+    /// a worker for `id` is already active (prevents two workers racing on the
+    /// same local file — see `InflightGuard`).
     pub fn spawn(self: Arc<Self>, id: TransferId) {
         tokio::spawn(async move {
+            let control = Arc::new(AtomicU8::new(C_RUN));
+            // Win the in-flight slot BEFORE touching status or acquiring a permit.
+            // `HashSet::insert` returns false when the id is already present.
+            {
+                let mut inflight = self.inflight.lock().unwrap();
+                if !inflight.insert(id) {
+                    return; // already-active id: drop this redundant worker
+                }
+            }
+            // From here, the guard clears inflight + controls on any exit path.
+            let _guard = InflightGuard {
+                inflight: self.inflight.clone(),
+                controls: self.controls.clone(),
+                id,
+            };
+            self.controls.lock().unwrap().insert(id, control.clone());
+
             // Mark queued so the UI shows it waiting for a worker slot.
             let _ = self.store.set_status(id, TransferStatus::Queued, None);
             self.emit_state(id);
@@ -143,10 +189,7 @@ impl TransferEngine {
                 .acquire_owned()
                 .await
                 .expect("semaphore");
-            let control = Arc::new(AtomicU8::new(C_RUN));
-            self.controls.lock().unwrap().insert(id, control.clone());
             self.run_transfer(id, control).await;
-            self.controls.lock().unwrap().remove(&id);
             drop(permit);
         });
     }
@@ -187,11 +230,19 @@ impl TransferEngine {
                     return;
                 }
                 Outcome::Canceled => {
-                    // Belt-and-suspenders: also remove the partial download here so
-                    // the artifact is gone even if cancel()'s remove raced an
-                    // in-flight chunk flush.
-                    if t.direction == Direction::Down {
-                        let _ = tokio::fs::remove_file(&t.local_path).await;
+                    // Deterministic cleanup now that streaming has stopped: drop the
+                    // partial download file, or delete the partial remote object for
+                    // an upload (SFTP leaves a real truncated file behind — S3/Azure
+                    // abort/GC the multipart on writer drop, but delete is harmless).
+                    // The writer was already dropped when `stream_upload` returned,
+                    // so this runs after the last byte was written → no resurrection.
+                    match t.direction {
+                        Direction::Down => {
+                            let _ = tokio::fs::remove_file(&t.local_path).await;
+                        }
+                        Direction::Up => {
+                            let _ = backend.delete(&t.remote_path).await;
+                        }
                     }
                     let _ = self.store.set_status(id, TransferStatus::Canceled, None);
                     self.emit_state(id);
@@ -227,7 +278,19 @@ impl TransferEngine {
         control: &Arc<AtomicU8>,
     ) -> Outcome {
         use std::io::SeekFrom;
-        let offset = t.transferred_bytes;
+        // Clamp the persisted resume offset to the partial file's real length: a
+        // user-deleted or truncated partial must not zero-pad into a corrupt file.
+        // Missing file → 0 (full restart); short file → restart from its real end.
+        let persisted = t.transferred_bytes;
+        let file_len = tokio::fs::metadata(&t.local_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let offset = persisted.min(file_len);
+        if offset != persisted {
+            // Keep the store honest about where we actually resumed from.
+            let _ = self.store.update_progress(t.id, offset, t.total_bytes);
+        }
         let mut reader = match backend.read(&t.remote_path, offset).await {
             Ok(r) => r,
             Err(e) => return Outcome::Failed(e.to_string(), e.is_retryable()),
@@ -333,6 +396,12 @@ impl TransferEngine {
         id: TransferId,
         connection_id: Option<u64>,
     ) -> crate::error::Result<()> {
+        // Already has a live worker: skip the rebind/offset-reset side effects and
+        // the redundant spawn. (The spawn itself is also guarded, but bailing here
+        // avoids mutating a running transfer's connection/offset out from under it.)
+        if self.is_active(id) {
+            return Ok(());
+        }
         if let Some(cid) = connection_id {
             self.store.rebind_connection(id, cid)?;
         }
@@ -377,16 +446,28 @@ impl TransferEngine {
                 })
                 .is_some()
         };
-        // If it wasn't running (queued/paused/failed), record canceled now.
+        // If it wasn't running (queued/paused/failed), record canceled now. A
+        // running worker records Canceled itself (and does its own cleanup) when
+        // it observes the flag; cleanup below is best-effort/idempotent either way.
         let t = self.store.get(id)?;
         if let Some(t) = t {
             if !running {
                 self.store.set_status(id, TransferStatus::Canceled, None)?;
                 self.emit_state(id);
             }
-            // Clean the partial download artifact regardless of running state.
-            if t.direction == Direction::Down {
-                let _ = tokio::fs::remove_file(&t.local_path).await;
+            match t.direction {
+                // Drop the partial local download artifact.
+                Direction::Down => {
+                    let _ = tokio::fs::remove_file(&t.local_path).await;
+                }
+                // Drop any partial remote object an interrupted upload left behind
+                // (e.g. a truncated SFTP file from a paused upload whose writer was
+                // dropped without shutdown).
+                Direction::Up => {
+                    if let Some(backend) = self.resolver.resolve(t.connection_id).await {
+                        let _ = backend.delete(&t.remote_path).await;
+                    }
+                }
             }
         }
         Ok(())

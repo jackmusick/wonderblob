@@ -361,3 +361,109 @@ async fn restart_loads_incomplete_and_resume_rebinds_to_finish() {
     settle(|| store2.get(id).unwrap().unwrap().status == TransferStatus::Completed).await;
     assert_eq!(std::fs::read(&local).unwrap(), body);
 }
+
+#[tokio::test]
+async fn resume_while_running_does_not_double_spawn() {
+    // A resume() (or any spawn) for a transfer whose worker is still live must be
+    // a no-op: two workers on one local file = corruption + duplicate terminals.
+    let backend = Arc::new(MockBackend::new());
+    let body: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+    backend.put("/r.bin", body.clone()).await;
+    backend.set_read_delay_ms(3); // keep the worker observably in-flight
+    let store = Arc::new(TransferStore::open_in_memory().unwrap());
+    let sink = Arc::new(CollectSink::default());
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("r.bin");
+    let engine = TransferEngine::new(
+        store.clone(),
+        Arc::new(OneBackend(backend.clone())),
+        sink.clone(),
+        fast_cfg(1),
+    );
+    let id = engine
+        .enqueue(NewTransfer {
+            connection_id: 1,
+            direction: Direction::Down,
+            remote_path: "/r.bin".into(),
+            local_path: local.to_string_lossy().into(),
+            name: "r.bin".into(),
+            total_bytes: Some(1_000_000),
+        })
+        .await
+        .unwrap();
+    settle(|| {
+        let t = store.get(id).unwrap().unwrap();
+        t.status == TransferStatus::Running && t.transferred_bytes > 0
+    })
+    .await;
+    // Hammer resume while the worker is alive — each must be rejected by the guard.
+    for _ in 0..8 {
+        engine.resume(id).await.unwrap();
+    }
+    assert!(
+        engine.is_active(id),
+        "the original worker should still own the slot"
+    );
+    backend.set_read_delay_ms(0); // let it finish
+    settle(|| store.get(id).unwrap().unwrap().status == TransferStatus::Completed).await;
+    // Exactly ONE terminal Completed state event for this id.
+    let completed = sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, TransferEvent::State(t) if t.id == id && t.status == TransferStatus::Completed))
+        .count();
+    assert_eq!(
+        completed, 1,
+        "expected exactly one Completed event, got {completed}"
+    );
+    assert_eq!(
+        std::fs::read(&local).unwrap(),
+        body,
+        "output must be byte-identical"
+    );
+}
+
+#[tokio::test]
+async fn upload_cancel_cleans_partial_remote() {
+    // SFTP leaves a real remote file behind on a cancelled upload; the engine must
+    // best-effort delete it. Pre-seed the remote so a no-op would leave it present.
+    let backend = Arc::new(MockBackend::new());
+    backend.put("/up.bin", vec![0u8; 16]).await; // stand-in partial remote object
+    backend.set_write_delay_ms(3); // observable mid-upload
+    let store = Arc::new(TransferStore::open_in_memory().unwrap());
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("up.bin");
+    std::fs::write(&local, vec![3u8; 400_000]).unwrap();
+    let engine = TransferEngine::new(
+        store.clone(),
+        Arc::new(OneBackend(backend.clone())),
+        Arc::new(CollectSink::default()),
+        fast_cfg(1),
+    );
+    let id = engine
+        .enqueue(NewTransfer {
+            connection_id: 1,
+            direction: Direction::Up,
+            remote_path: "/up.bin".into(),
+            local_path: local.to_string_lossy().into(),
+            name: "up.bin".into(),
+            total_bytes: Some(400_000),
+        })
+        .await
+        .unwrap();
+    settle(|| {
+        let t = store.get(id).unwrap().unwrap();
+        t.status == TransferStatus::Running && t.transferred_bytes > 0
+    })
+    .await;
+    engine.cancel(id).await.unwrap();
+    // The worker's Canceled branch deletes the remote *before* it records the
+    // Canceled status, so once status settles the partial must already be gone.
+    settle(|| store.get(id).unwrap().unwrap().status == TransferStatus::Canceled).await;
+    assert!(
+        backend.get("/up.bin").await.is_none(),
+        "cancelled upload left a partial remote object behind"
+    );
+}

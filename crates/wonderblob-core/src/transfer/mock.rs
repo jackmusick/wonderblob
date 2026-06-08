@@ -21,6 +21,8 @@ pub struct MockBackend {
     /// Per-`poll_read` delay (ms); makes a transfer observably in-flight so tests
     /// can catch the `Running` state / pause mid-stream. 0 = no delay.
     read_delay_ms: Arc<AtomicU64>,
+    /// Per-`poll_write` delay (ms); the upload-side analogue of `read_delay_ms`.
+    write_delay_ms: Arc<AtomicU64>,
 }
 
 impl Default for MockBackend {
@@ -36,6 +38,7 @@ impl MockBackend {
             fail_read_after: Arc::new(AtomicI64::new(-1)),
             online: Arc::new(AtomicBool::new(true)),
             read_delay_ms: Arc::new(AtomicU64::new(0)),
+            write_delay_ms: Arc::new(AtomicU64::new(0)),
         }
     }
     pub async fn put(&self, path: &str, bytes: Vec<u8>) {
@@ -55,6 +58,11 @@ impl MockBackend {
     /// observably in-flight (catch `Running`, pause mid-stream).
     pub fn set_read_delay_ms(&self, ms: u64) {
         self.read_delay_ms.store(ms, Ordering::SeqCst);
+    }
+    /// Make each `poll_write` wait `ms`, so an upload is observably in-flight
+    /// (catch `Running`, cancel mid-stream).
+    pub fn set_write_delay_ms(&self, ms: u64) {
+        self.write_delay_ms.store(ms, Ordering::SeqCst);
     }
 }
 
@@ -119,14 +127,27 @@ struct MockWriter {
     path: String,
     buf: Vec<u8>,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    delay_ms: u64,
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl AsyncWrite for MockWriter {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
+        // Per-chunk delay: makes the upload observably slow for tests.
+        if self.delay_ms > 0 {
+            if self.sleep.is_none() {
+                let d = self.delay_ms;
+                self.sleep = Some(Box::pin(tokio::time::sleep(Duration::from_millis(d))));
+            }
+            match self.sleep.as_mut().unwrap().as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => self.sleep = None,
+            }
+        }
         self.buf.extend_from_slice(data);
         Poll::Ready(Ok(data.len()))
     }
@@ -194,6 +215,8 @@ impl StorageBackend for MockBackend {
             path: path.into(),
             buf: Vec::new(),
             files: self.files.clone(),
+            delay_ms: self.write_delay_ms.load(Ordering::SeqCst),
+            sleep: None,
         }))
     }
     async fn delete(&self, path: &str) -> Result<()> {
