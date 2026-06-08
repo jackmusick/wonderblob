@@ -78,8 +78,13 @@ jobs:
             https://flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.gnome.Platform//47 org.gnome.Sdk//47
 
-          # tauri-action left the deb here; the manifest expects it as wonderblob.deb.
-          deb=$(ls src-tauri/target/release/bundle/deb/wonderblob_*_amd64.deb | head -n1)
+          # tauri-action left the deb under the Cargo workspace target dir; the
+          # manifest expects it copied in as wonderblob.deb. Search both possible
+          # target locations and match case-insensitively (productName is
+          # "Wonderblob", so the file is Wonderblob_<ver>_amd64.deb).
+          deb=$(find target src-tauri/target -path '*/bundle/deb/*' \
+            -iname 'wonderblob_*_amd64.deb' 2>/dev/null | head -n1)
+          test -n "$deb" || { echo "no deb found under target/**/bundle/deb"; exit 1; }
           cp "$deb" packaging/flatpak/wonderblob.deb
 
           flatpak-builder --user --force-clean --repo=fp-repo \

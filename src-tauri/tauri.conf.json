@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "wonderblob",
-  "version": "0.6.0",
+  "productName": "Wonderblob",
+  "mainBinaryName": "wonderblob",
+  "version": "0.1.0",
   "identifier": "com.wonderblob.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "wonderblob",
+        "title": "Wonderblob",
         "width": 800,
         "height": 600
       }

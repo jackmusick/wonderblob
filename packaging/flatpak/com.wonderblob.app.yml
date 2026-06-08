@@ -1,7 +1,7 @@
 # Flatpak manifest — the Linux bundle (one install, real menu integration).
 #
 # Local build + run (needs the deb next to this file, named wonderblob.deb):
-#   cp src-tauri/target/release/bundle/deb/wonderblob_*_amd64.deb \
+#   cp target/release/bundle/deb/Wonderblob_*_amd64.deb \
 #     packaging/flatpak/wonderblob.deb
 #   flatpak-builder --user --install --force-clean build-dir \
 #     packaging/flatpak/com.wonderblob.app.yml

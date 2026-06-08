@@ -1,4 +1,10 @@
 :root {
+  /* Theme native form controls (<select>, number spinners, scrollbars) to
+     match the active scheme — WebKitGTK renders these as native widgets that
+     ignore CSS background, so without this they default to light even in dark
+     mode. Flipped to `dark` in the media query below. */
+  color-scheme: light;
+
   /* type: platform-native stack, desktop density */
   --font-ui: system-ui, -apple-system, "Segoe UI", Cantarell, sans-serif;
   --font-mono: ui-monospace, "Cascadia Code", monospace;
@@ -25,6 +31,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
+    color-scheme: dark;
     --bg-app: #1e1e20;
     --bg-sidebar: #252528;
     --bg-content: #2a2a2d;
