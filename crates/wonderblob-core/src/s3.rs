@@ -329,6 +329,7 @@ impl StorageBackend for S3Backend {
             part_number: 0,
             parts: Vec::new(),
             state: WState::Idle,
+            terminated: false,
         }))
     }
 
@@ -573,10 +574,32 @@ pub struct S3MultipartWriter {
     part_number: i32,
     parts: Vec<CompletedPart>,
     state: WState,
+    /// True once the MPU has been resolved — either completed successfully or
+    /// aborted. Guards against double-abort and tells `Drop` whether a dangling
+    /// upload still needs cleanup.
+    terminated: bool,
 }
 
 fn to_io(e: StorageError) -> io::Error {
     io::Error::other(e.to_string())
+}
+
+/// Best-effort, fire-and-forget AbortMultipartUpload so a failed or abandoned
+/// upload doesn't leave a dangling MPU accruing storage cost on real S3. Spawned
+/// detached on the current tokio runtime; if there is no runtime (e.g. dropped
+/// outside an async context) we can't clean up and silently skip.
+fn spawn_abort(client: Client, bucket: String, key: String, upload_id: String) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(&bucket)
+                .key(&key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+        });
+    }
 }
 
 fn upload_part_fut(
@@ -606,6 +629,20 @@ fn upload_part_fut(
 }
 
 impl S3MultipartWriter {
+    /// Mark the MPU resolved and fire a best-effort abort if it isn't already.
+    fn abort_mpu(&mut self) {
+        if self.terminated {
+            return;
+        }
+        self.terminated = true;
+        spawn_abort(
+            self.client.clone(),
+            self.bucket.clone(),
+            self.key.clone(),
+            self.upload_id.clone(),
+        );
+    }
+
     /// Drain the current buffer into a new part-upload future.
     fn start_part(&mut self) {
         let body = self.buf.split().to_vec();
@@ -657,6 +694,8 @@ impl S3MultipartWriter {
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(e)) => {
+                // A part upload failed: abort the MPU before surfacing the error.
+                self.abort_mpu();
                 self.state = WState::Done;
                 Poll::Ready(Err(to_io(e)))
             }
@@ -670,10 +709,34 @@ impl S3MultipartWriter {
         };
         match poll {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(r) => {
+            Poll::Ready(Ok(())) => {
+                // Upload finalized successfully; nothing to clean up.
+                self.terminated = true;
                 self.state = WState::Done;
-                Poll::Ready(r.map_err(to_io))
+                Poll::Ready(Ok(()))
             }
+            Poll::Ready(Err(e)) => {
+                // Completion failed: abort the dangling MPU.
+                self.abort_mpu();
+                self.state = WState::Done;
+                Poll::Ready(Err(to_io(e)))
+            }
+        }
+    }
+}
+
+impl Drop for S3MultipartWriter {
+    fn drop(&mut self) {
+        // Dropped before a successful shutdown (e.g. caller bailed mid-upload):
+        // best-effort abort so the MPU doesn't dangle. No-op once terminated.
+        if !self.terminated {
+            self.terminated = true;
+            spawn_abort(
+                self.client.clone(),
+                self.bucket.clone(),
+                self.key.clone(),
+                self.upload_id.clone(),
+            );
         }
     }
 }
