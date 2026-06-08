@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Manager, State};
 use wonderblob_core::azblob::{AzAuth, AzBlobBackend, AzBlobConfig};
+use wonderblob_core::edit::{image_mime, preview_plan, PreviewPlan, PREVIEW_CAP_BYTES};
 use wonderblob_core::error::StorageError;
 use wonderblob_core::s3::{S3Backend, S3Config};
 use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
@@ -598,4 +599,85 @@ fn sibling_copy_path(remote_path: &str) -> String {
         Some(i) if i > 0 => format!("{dir}{} (local copy){}", &file[..i], &file[i..]),
         _ => format!("{dir}{file} (local copy)"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// In-app preview (capped read → text decode or image data URL)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewResult {
+    /// Tagged plan: { kind: "text" | "image" | "pdf" | "tooLarge" | "unsupported", … }
+    pub plan: PreviewPlan,
+    /// Decoded UTF-8 for `text` previews.
+    pub text: Option<String>,
+    /// "data:<mime>;base64,…" for `image` previews.
+    pub data_url: Option<String>,
+}
+
+/// Read up to PREVIEW_CAP_BYTES of a remote file for the in-app preview.
+#[tauri::command]
+pub async fn preview_file(
+    state: State<'_, AppState>,
+    id: ConnectionId,
+    path: String,
+    name: String,
+    size: Option<u64>,
+) -> Result<PreviewResult, StorageError> {
+    use base64::Engine;
+    use tokio::io::AsyncReadExt;
+
+    let plan = preview_plan(&name, size, PREVIEW_CAP_BYTES);
+    // Only the renderable kinds read bytes; the rest report and stop.
+    match &plan {
+        PreviewPlan::Text | PreviewPlan::Image => {}
+        _ => {
+            return Ok(PreviewResult {
+                plan,
+                text: None,
+                data_url: None,
+            })
+        }
+    }
+    let backend = state.get(id).await?;
+    let mut reader = backend.read(&path, 0).await?;
+    // Read cap+1 so we can detect (and reject) files whose real size exceeded the
+    // declared `size` (or had no declared size).
+    let mut buf = Vec::new();
+    let mut limited = (&mut reader).take(PREVIEW_CAP_BYTES + 1);
+    limited
+        .read_to_end(&mut buf)
+        .await
+        .map_err(StorageError::other)?;
+    if buf.len() as u64 > PREVIEW_CAP_BYTES {
+        return Ok(PreviewResult {
+            plan: PreviewPlan::TooLarge {
+                size: buf.len() as u64,
+                cap: PREVIEW_CAP_BYTES,
+            },
+            text: None,
+            data_url: None,
+        });
+    }
+    Ok(match plan {
+        PreviewPlan::Text => PreviewResult {
+            plan: PreviewPlan::Text,
+            text: Some(String::from_utf8_lossy(&buf).into_owned()),
+            data_url: None,
+        },
+        PreviewPlan::Image => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+            PreviewResult {
+                plan: PreviewPlan::Image,
+                text: None,
+                data_url: Some(format!("data:{};base64,{}", image_mime(&name), b64)),
+            }
+        }
+        other => PreviewResult {
+            plan: other,
+            text: None,
+            data_url: None,
+        },
+    })
 }
