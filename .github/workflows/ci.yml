@@ -6,6 +6,13 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    # The dep graph (AWS + Azure + reqwest/rustls/ring/aws-lc-sys + russh + rusqlite)
+    # makes each debug test binary link ~250 rlibs. With full debuginfo the linker
+    # OOMs on the 7 GB GitHub runner (ld SIGBUS). Dropping debuginfo shrinks the
+    # object files enough to link comfortably and also speeds the build.
+    env:
+      RUSTFLAGS: "-C debuginfo=0"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
 
