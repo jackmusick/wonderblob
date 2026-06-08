@@ -74,3 +74,24 @@ npm run tauri dev        # dev app (needs the vite server, which this starts)
 # Gated integration tests:
 WONDERBLOB_TEST_SFTP=1 cargo test -p wonderblob-core --test sftp_contract
 ```
+
+## Install scripts — verify on first real release
+
+The Flatpak/PowerShell install path (spec
+`docs/superpowers/specs/2026-06-08-wonderblob-install-parity-design.md`) ships
+unverified end-to-end — it needs a published release to test:
+
+1. **`releases/latest` needs a PUBLISHED, non-prerelease release.** The current
+   `release.yml` produces a *draft prerelease*; `Install-Wonderblob.ps1` and
+   `install.sh` both query `/releases/latest`, which skips drafts/prereleases.
+   Publish (and unflag prerelease on) the first release before advertising the
+   one-liners.
+2. **Flatpak live checks (can't be done headless):** after the tag build,
+   `flatpak install --user wonderblob.flatpak` then `flatpak run com.wonderblob.app`
+   — confirm (a) the window launches (webkit ABI vs GNOME runtime 47),
+   (b) OneDrive sign-in's `wonderblob://auth` deep-link returns into the app,
+   (c) EditSession opens a file in the editor and saves back. Fixes if not:
+   bump `runtime-version`, add `x-scheme-handler/wonderblob` MimeType to the
+   manifest desktop file, route the editor spawn through OpenURI.
+3. **Windows:** `irm … | iex` on a real Windows box; confirm per-user silent
+   install and that re-running updates in place.
