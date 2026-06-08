@@ -32,6 +32,28 @@
 
   let transfersOpen = $state(false);
 
+  // Resizable sidebar (persisted; defaults wider than the old fixed 240px).
+  let sidebarWidth = $state(280);
+  $effect(() => {
+    const saved = Number(localStorage.getItem("wb:sidebarWidth"));
+    if (saved >= 180 && saved <= 600) sidebarWidth = saved;
+  });
+  function startSidebarResize(e: PointerEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    const onMove = (ev: PointerEvent) => {
+      sidebarWidth = Math.min(600, Math.max(180, startW + (ev.clientX - startX)));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      localStorage.setItem("wb:sidebarWidth", String(Math.round(sidebarWidth)));
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
   // Right-click menu for the Download toolbar icon (primary click = ~/Downloads).
   let downloadMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
   function openDownloadMenu(e: MouseEvent) {
@@ -262,9 +284,17 @@
 </script>
 
 <div class="shell">
-  <aside class="sidebar">
+  <aside class="sidebar" style="width:{sidebarWidth}px">
     <BookmarkList bind:this={list} onnew={openNew} onedit={openEdit} />
   </aside>
+  <div
+    class="splitter"
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Resize sidebar"
+    tabindex="-1"
+    onpointerdown={startSidebarResize}
+  ></div>
   <main class="content">
     {#if $activeConnection}
       <div class="toolbar">
@@ -385,11 +415,24 @@
 <style>
   .shell { display: flex; height: 100vh; }
   .sidebar {
-    width: var(--sidebar-width);
     background: var(--bg-sidebar);
-    border-right: 1px solid var(--border);
     padding: 8px;
     flex-shrink: 0;
+    overflow-y: auto;
+  }
+  /* Drag handle between sidebar and content. */
+  .splitter {
+    width: 5px;
+    margin-left: -3px;
+    flex-shrink: 0;
+    cursor: col-resize;
+    background: var(--border);
+    background-clip: content-box;
+    border-left: 2px solid transparent;
+    z-index: 5;
+  }
+  .splitter:hover {
+    border-left-color: var(--accent);
   }
   .content { flex: 1; display: flex; flex-direction: column; background: var(--bg-content); min-width: 0; }
   .toolbar {
