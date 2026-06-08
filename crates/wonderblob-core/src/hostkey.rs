@@ -45,7 +45,19 @@ impl HostKeyStore {
     }
 
     /// Append this host+key to the store in OpenSSH known_hosts format.
+    ///
+    /// Defense in depth: refuse to persist when the host already has a
+    /// *different* pinned key (`Changed`). A changed key must never silently
+    /// (or even via a buggy caller) join the store — the UI already suppresses
+    /// the "remember" option for changed keys, but the security invariant is
+    /// enforced here too so it doesn't depend on the frontend.
     pub fn remember(&self, host: &str, port: u16, key: &PublicKey) -> Result<()> {
+        if matches!(self.classify(host, port, key)?, HostKeyStatus::Changed) {
+            return Err(StorageError::Conflict {
+                path: format!("{host}:{port}"),
+                detail: "refusing to remember a host key that differs from the pinned one".into(),
+            });
+        }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(StorageError::other)?;
         }
@@ -133,6 +145,27 @@ mod tests {
         assert!(matches!(
             store.classify("h.example.com", 22, &k2).unwrap(),
             HostKeyStatus::Changed
+        ));
+    }
+
+    #[test]
+    fn remember_refuses_to_persist_a_changed_key() {
+        // Defense in depth: even if a caller bypasses the dialog's guard and
+        // asks to remember a key that conflicts with the pinned one, the store
+        // refuses — so the MITM key can never join known_hosts.
+        let dir = tempfile::tempdir().unwrap();
+        let store = HostKeyStore::new(dir.path().join("known_hosts"));
+        let k1 = sample_key();
+        store.remember("h.example.com", 22, &k1).unwrap();
+        let k2 = other_key_same_type();
+        assert!(matches!(
+            store.remember("h.example.com", 22, &k2),
+            Err(StorageError::Conflict { .. })
+        ));
+        // The pinned key is untouched; the conflicting one never persisted.
+        assert!(matches!(
+            store.classify("h.example.com", 22, &k1).unwrap(),
+            HostKeyStatus::Known
         ));
     }
 
