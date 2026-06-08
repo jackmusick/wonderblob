@@ -56,11 +56,23 @@ export async function initTransfers() {
   });
 }
 
+const FINISHED = new Set(["completed", "canceled", "failed"]);
+
 export async function clearCompleted() {
   await api.clearCompleted();
   transfers.update((m) => {
     const next = new Map(m);
-    for (const [id, t] of next) if (t.status === "completed") next.delete(id);
+    for (const [id, t] of next) if (FINISHED.has(t.status)) next.delete(id);
+    return next;
+  });
+}
+
+/** Force-remove a single transfer regardless of status (per-row dismiss). */
+export async function clearTransfer(id: number) {
+  await api.clearTransfer(id);
+  transfers.update((m) => {
+    const next = new Map(m);
+    next.delete(id);
     return next;
   });
 }

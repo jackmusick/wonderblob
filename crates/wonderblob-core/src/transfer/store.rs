@@ -195,6 +195,15 @@ impl TransferStore {
         )
         .map_err(map_db)
     }
+
+    /// Force-remove a single transfer row regardless of status — the escape
+    /// hatch for a row wedged in a non-terminal state that "Clear finished"
+    /// can't reach. Returns the number removed (0 or 1).
+    pub fn clear_one(&self, id: TransferId) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM transfers WHERE id = ?1", params![id])
+            .map_err(map_db)
+    }
 }
 
 fn row_to_transfer(row: &Row<'_>) -> rusqlite::Result<Transfer> {

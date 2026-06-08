@@ -4,7 +4,7 @@
   import { formatSize } from "$lib/format";
   import { formatSpeed, percent } from "$lib/transfer-format";
   import { activeConnection } from "$lib/stores/session";
-  import { clearCompleted, transferList, transferSpeed } from "$lib/stores/transfers";
+  import { clearCompleted, clearTransfer, transferList, transferSpeed } from "$lib/stores/transfers";
   import Icon from "./Icon.svelte";
 
   let {
@@ -107,7 +107,16 @@
               <button class="ghost" onclick={() => cancel(t.id)}>Cancel</button>
             {:else if t.status === "failed"}
               <button class="ghost" onclick={() => resume(t.id)}>Retry</button>
-              <button class="ghost" onclick={() => cancel(t.id)}>Cancel</button>
+            {/if}
+            {#if t.status === "completed" || t.status === "canceled" || t.status === "failed"}
+              <button
+                class="icon-dismiss"
+                title="Remove from list"
+                aria-label="Remove {t.name} from list"
+                onclick={() => run(() => clearTransfer(t.id))}
+              >
+                <Icon name="x" size={14} />
+              </button>
             {/if}
           </span>
         </div>
@@ -126,6 +135,10 @@
   .panel {
     display: flex;
     flex-direction: column;
+    /* Fill the flex parent horizontally — without flex:1 the panel shrinks to
+       content width, leaving a gap on the right that doesn't track resize. */
+    flex: 1;
+    min-width: 0;
     height: 100%;
     min-height: 0;
   }
@@ -257,6 +270,21 @@
     white-space: nowrap;
   }
   .ghost:hover {
+    background: var(--bg-hover);
+    color: var(--fg-primary);
+  }
+  .icon-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius);
+    color: var(--fg-secondary);
+  }
+  .icon-dismiss:hover {
     background: var(--bg-hover);
     color: var(--fg-primary);
   }
