@@ -21,6 +21,16 @@
     bookmarks = await api.bookmarksList();
   }
 
+  function protoBadge(p: Bookmark["protocol"]): string {
+    return p === "sftp" ? "SFTP" : p === "s3" ? "S3" : "Azure";
+  }
+
+  function rowTitle(b: Bookmark): string {
+    if (b.protocol === "sftp") return `${b.username ?? ""}@${b.host ?? ""}:${b.port ?? 22}`;
+    if (b.protocol === "s3") return b.s3?.endpoint ?? `S3 (${b.s3?.region ?? "aws"})`;
+    return b.azblob?.endpoint ?? `Azure (${b.azblob?.account ?? ""})`;
+  }
+
   $effect(() => {
     reload();
   });
@@ -44,9 +54,8 @@
     const { [b.id]: _, ...rest } = errors;
     errors = rest;
     try {
-      // Task 9 will store `capabilities` in the session for UI gating.
-      const { id } = await api.connectBookmark(b.id);
-      activeConnection.set({ id, bookmark: b });
+      const res = await api.connectBookmark(b.id);
+      activeConnection.set({ id: res.id, bookmark: b, capabilities: res.capabilities });
       currentPath.set(b.initialPath ?? "/");
     } catch (e) {
       errors = { ...errors, [b.id]: errorMessage(e) };
@@ -132,7 +141,8 @@
         onclick={() => (focusedIndex = i)}
         onkeydown={() => {}}
       >
-        <span class="label" title="{b.username}@{b.host}:{b.port}">{b.label}</span>
+        <span class="label" title={rowTitle(b)}>{b.label}</span>
+        <span class="badge">{protoBadge(b.protocol)}</span>
         {#if connectingId === b.id}
           <span class="hint">connecting…</span>
         {:else}
@@ -215,6 +225,20 @@
   .hint {
     font-size: var(--text-small);
     color: var(--fg-secondary);
+  }
+  .badge {
+    flex-shrink: 0;
+    padding: 0 5px;
+    font-size: var(--text-small);
+    color: var(--fg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    line-height: 16px;
+  }
+  /* Hide the badge while the row shows its hover actions, to avoid crowding. */
+  .row:hover .badge,
+  .row:focus-within .badge {
+    display: none;
   }
   /* Hidden until hover or keyboard focus lands inside the row, but the
      buttons stay rendered so they remain in the tab order. */

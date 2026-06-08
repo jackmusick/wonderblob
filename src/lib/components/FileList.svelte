@@ -94,6 +94,10 @@
     if (conn) load(conn.id, $currentPath);
   }
 
+  export function selected(): Entry | null {
+    return selectedIndex >= 0 && selectedIndex < entries.length ? entries[selectedIndex] : null;
+  }
+
   function cancelConfirm() {
     if (confirmTimer) clearTimeout(confirmTimer);
     confirmingDeletePath = null;
