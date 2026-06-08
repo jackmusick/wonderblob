@@ -20,8 +20,8 @@
   let host = $state(initial?.host ?? "");
   let port = $state(initial?.port ?? 22);
   let username = $state(initial?.username ?? "");
-  let authType = $state<AuthMethod["type"]>(initial?.authMethod.type ?? "agent");
-  let keyPath = $state(initial?.authMethod.type === "keyFile" ? initial.authMethod.path : "");
+  let authType = $state<AuthMethod["type"]>(initial?.authMethod?.type ?? "agent");
+  let keyPath = $state(initial?.authMethod?.type === "keyFile" ? initial.authMethod.path : "");
   let secret = $state(""); // password or key passphrase; never persisted locally
   let initialPath = $state(initial?.initialPath ?? "");
   let saving = $state(false);
@@ -30,9 +30,9 @@
   let panelEl = $state<HTMLDivElement | null>(null);
 
   // Editing a bookmark whose method already stores a secret: blank means keep.
-  const hasSavedSecret = initial != null && initial.authMethod.type !== "agent";
+  const hasSavedSecret = initial != null && initial.authMethod?.type !== "agent";
   let secretPlaceholder = $derived(
-    hasSavedSecret && initial?.authMethod.type === authType
+    hasSavedSecret && initial?.authMethod?.type === authType
       ? "Leave blank to keep saved secret"
       : ""
   );

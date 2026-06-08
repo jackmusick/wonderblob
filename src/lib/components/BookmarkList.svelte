@@ -44,7 +44,8 @@
     const { [b.id]: _, ...rest } = errors;
     errors = rest;
     try {
-      const id = await api.connectBookmark(b.id);
+      // Task 9 will store `capabilities` in the session for UI gating.
+      const { id } = await api.connectBookmark(b.id);
       activeConnection.set({ id, bookmark: b });
       currentPath.set(b.initialPath ?? "/");
     } catch (e) {

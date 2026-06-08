@@ -12,6 +12,9 @@ pub fn run() {
         .manage(state::AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::connect_sftp,
+            commands::connect_s3,
+            commands::connect_azblob,
+            commands::share_link,
             commands::disconnect,
             commands::list_dir,
             commands::download_file,

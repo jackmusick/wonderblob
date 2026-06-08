@@ -1,13 +1,15 @@
-use crate::bookmarks::{secrets, Bookmark, BookmarkStore};
+use crate::bookmarks::{secrets, AzAuthKind, Bookmark, BookmarkStore};
 use crate::state::{AppState, ConnectionId};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Manager, State};
 use tokio::io::AsyncWriteExt;
+use wonderblob_core::azblob::{AzAuth, AzBlobBackend, AzBlobConfig};
 use wonderblob_core::error::StorageError;
+use wonderblob_core::s3::{S3Backend, S3Config};
 use wonderblob_core::sftp::{SftpAuth, SftpBackend, SftpConfig};
-use wonderblob_core::vfs::{Entry, StorageBackend};
+use wonderblob_core::vfs::{Capabilities, Entry, StorageBackend};
 
 /// Generous ceiling so an unanswered agent prompt (e.g. 1Password approval
 /// dialog) can't hang a frontend invoke forever.
@@ -35,11 +37,28 @@ pub struct SftpConnectArgs {
     pub auth: AuthSpec,
 }
 
+/// Returned by every connect command so the frontend can gate UI on capabilities.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectResult {
+    pub id: ConnectionId,
+    pub capabilities: Capabilities,
+}
+
+/// Register a freshly-built backend in the connection map and capture its
+/// capabilities for the connect result.
+async fn register(state: &State<'_, AppState>, backend: Arc<dyn StorageBackend>) -> ConnectResult {
+    let capabilities = backend.capabilities();
+    let id = state.next_id();
+    state.connections.write().await.insert(id, backend);
+    ConnectResult { id, capabilities }
+}
+
 #[tauri::command]
 pub async fn connect_sftp(
     state: State<'_, AppState>,
     args: SftpConnectArgs,
-) -> Result<ConnectionId, StorageError> {
+) -> Result<ConnectResult, StorageError> {
     let auth = match args.auth {
         AuthSpec::Agent => SftpAuth::Agent,
         AuthSpec::KeyFile { path, passphrase } => SftpAuth::KeyFile { path, passphrase },
@@ -58,13 +77,78 @@ pub async fn connect_sftp(
     .map_err(|_| StorageError::Network {
         detail: "connection timed out".into(),
     })??;
-    let id = state.next_id();
-    state
-        .connections
-        .write()
-        .await
-        .insert(id, Arc::new(backend));
-    Ok(id)
+    Ok(register(&state, Arc::new(backend)).await)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3ConnectArgs {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub force_path_style: bool,
+}
+
+#[tauri::command]
+pub async fn connect_s3(
+    state: State<'_, AppState>,
+    args: S3ConnectArgs,
+) -> Result<ConnectResult, StorageError> {
+    let backend = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        S3Backend::connect(S3Config {
+            access_key_id: args.access_key_id,
+            secret_access_key: args.secret_access_key,
+            region: args.region,
+            endpoint: args.endpoint,
+            force_path_style: args.force_path_style,
+        }),
+    )
+    .await
+    .map_err(|_| StorageError::Network {
+        detail: "connection timed out".into(),
+    })??;
+    Ok(register(&state, Arc::new(backend)).await)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AzBlobConnectArgs {
+    pub account: String,
+    pub endpoint: Option<String>,
+    pub auth_kind: AzAuthKind,
+    pub secret: String,
+}
+
+/// Build the Azure auth credential from a discriminant + the keychain/arg secret.
+fn az_auth(kind: AzAuthKind, secret: String) -> AzAuth {
+    match kind {
+        AzAuthKind::AccountKey => AzAuth::AccountKey(secret),
+        AzAuthKind::ConnectionString => AzAuth::ConnectionString(secret),
+        AzAuthKind::Sas => AzAuth::Sas(secret),
+    }
+}
+
+#[tauri::command]
+pub async fn connect_azblob(
+    state: State<'_, AppState>,
+    args: AzBlobConnectArgs,
+) -> Result<ConnectResult, StorageError> {
+    let backend = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        AzBlobBackend::connect(AzBlobConfig {
+            account: args.account,
+            endpoint: args.endpoint,
+            auth: az_auth(args.auth_kind, args.secret),
+        }),
+    )
+    .await
+    .map_err(|_| StorageError::Network {
+        detail: "connection timed out".into(),
+    })??;
+    Ok(register(&state, Arc::new(backend)).await)
 }
 
 #[tauri::command]
@@ -159,6 +243,16 @@ pub async fn make_dir(
     state.get(id).await?.mkdir(&path).await
 }
 
+#[tauri::command]
+pub async fn share_link(
+    state: State<'_, AppState>,
+    id: ConnectionId,
+    path: String,
+    expiry_secs: u64,
+) -> Result<String, StorageError> {
+    state.get(id).await?.share_link(&path, expiry_secs).await
+}
+
 // ---------------------------------------------------------------------------
 // Bookmarks
 // ---------------------------------------------------------------------------
@@ -206,10 +300,16 @@ pub async fn bookmark_save(
         // method doesn't use one (Agent) or the method changed (e.g. an old
         // password must not be reused as a key passphrase).  Only when the
         // method is unchanged and still secret-using do we keep the saved one.
+        // `auth_method` is now `Option<AuthMethod>`; comparing discriminants on
+        // the Option is correct — two cloud edits (both `None`) compare equal so
+        // the saved secret is kept.
         let method_changed = existing.as_ref().is_some_and(|e| {
             std::mem::discriminant(&e.auth_method) != std::mem::discriminant(&bookmark.auth_method)
         });
-        if matches!(bookmark.auth_method, AuthMethod::Agent) || method_changed {
+        // Agent (SFTP) uses no secret; cloud protocols always use one. Only wipe
+        // a stale secret for Agent or when the SFTP method changed.
+        let is_agent = matches!(bookmark.auth_method, Some(AuthMethod::Agent));
+        if is_agent || method_changed {
             let k = key.clone();
             keychain(move || secrets::delete(&k)).await?;
         }
@@ -237,8 +337,8 @@ pub async fn connect_bookmark(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: uuid::Uuid,
-) -> Result<ConnectionId, StorageError> {
-    use crate::bookmarks::AuthMethod;
+) -> Result<ConnectResult, StorageError> {
+    use crate::bookmarks::{AuthMethod, Protocol};
     let b = store(&app)?
         .load_all()?
         .into_iter()
@@ -246,42 +346,97 @@ pub async fn connect_bookmark(
         .ok_or_else(|| StorageError::Other {
             detail: "bookmark not found".into(),
         })?;
-    let auth = match b.auth_method {
-        AuthMethod::Agent => SftpAuth::Agent,
-        AuthMethod::KeyFile { path } => {
-            let key = b.id.to_string();
-            SftpAuth::KeyFile {
-                path,
-                passphrase: keychain(move || secrets::get(&key)).await?,
-            }
+    let key = b.id.to_string();
+
+    let backend: Arc<dyn StorageBackend> = match b.protocol {
+        Protocol::Sftp => {
+            let auth = match b.auth_method.clone().ok_or_else(|| StorageError::Other {
+                detail: "SFTP bookmark missing auth method".into(),
+            })? {
+                AuthMethod::Agent => SftpAuth::Agent,
+                AuthMethod::KeyFile { path } => {
+                    let k = key.clone();
+                    SftpAuth::KeyFile {
+                        path,
+                        passphrase: keychain(move || secrets::get(&k)).await?,
+                    }
+                }
+                AuthMethod::Password => {
+                    let k = key.clone();
+                    SftpAuth::Password(keychain(move || secrets::get(&k)).await?.ok_or(
+                        StorageError::AuthFailed {
+                            detail: "no saved password".into(),
+                        },
+                    )?)
+                }
+            };
+            let backend = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                SftpBackend::connect(SftpConfig {
+                    host: b.host,
+                    port: b.port,
+                    username: b.username,
+                    auth,
+                }),
+            )
+            .await
+            .map_err(|_| StorageError::Network {
+                detail: "connection timed out".into(),
+            })??;
+            Arc::new(backend)
         }
-        AuthMethod::Password => {
-            let key = b.id.to_string();
-            SftpAuth::Password(keychain(move || secrets::get(&key)).await?.ok_or(
-                StorageError::AuthFailed {
-                    detail: "no saved password".into(),
-                },
-            )?)
+        Protocol::S3 => {
+            let p = b.s3.ok_or_else(|| StorageError::Other {
+                detail: "S3 bookmark missing params".into(),
+            })?;
+            let k = key.clone();
+            let secret =
+                keychain(move || secrets::get(&k))
+                    .await?
+                    .ok_or(StorageError::AuthFailed {
+                        detail: "no saved secret access key".into(),
+                    })?;
+            let backend = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                S3Backend::connect(S3Config {
+                    access_key_id: p.access_key_id,
+                    secret_access_key: secret,
+                    region: p.region,
+                    endpoint: p.endpoint,
+                    force_path_style: p.force_path_style,
+                }),
+            )
+            .await
+            .map_err(|_| StorageError::Network {
+                detail: "connection timed out".into(),
+            })??;
+            Arc::new(backend)
+        }
+        Protocol::AzBlob => {
+            let p = b.azblob.ok_or_else(|| StorageError::Other {
+                detail: "Azure bookmark missing params".into(),
+            })?;
+            let k = key.clone();
+            let secret =
+                keychain(move || secrets::get(&k))
+                    .await?
+                    .ok_or(StorageError::AuthFailed {
+                        detail: "no saved Azure credential".into(),
+                    })?;
+            let backend = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                AzBlobBackend::connect(AzBlobConfig {
+                    account: p.account,
+                    endpoint: p.endpoint,
+                    auth: az_auth(p.auth_kind, secret),
+                }),
+            )
+            .await
+            .map_err(|_| StorageError::Network {
+                detail: "connection timed out".into(),
+            })??;
+            Arc::new(backend)
         }
     };
-    let backend = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        SftpBackend::connect(SftpConfig {
-            host: b.host,
-            port: b.port,
-            username: b.username,
-            auth,
-        }),
-    )
-    .await
-    .map_err(|_| StorageError::Network {
-        detail: "connection timed out".into(),
-    })??;
-    let cid = state.next_id();
-    state
-        .connections
-        .write()
-        .await
-        .insert(cid, Arc::new(backend));
-    Ok(cid)
+    Ok(register(&state, backend).await)
 }
