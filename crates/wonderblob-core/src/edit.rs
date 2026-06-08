@@ -114,6 +114,68 @@ pub async fn save_back(
     Ok(RemoteStat::from_entry(&entry))
 }
 
+/// Default ceiling for in-app preview; over this we offer "open in editor".
+pub const PREVIEW_CAP_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PreviewPlan {
+    Text,
+    Image,
+    Pdf,
+    TooLarge { size: u64, cap: u64 },
+    Unsupported { ext: String },
+}
+
+fn ext_of(name: &str) -> Option<String> {
+    name.rfind('.')
+        .filter(|&i| i > 0 && i + 1 < name.len())
+        .map(|i| name[i + 1..].to_ascii_lowercase())
+}
+
+/// Decide how `name` (with optional known `size`) should preview, capped at `cap`.
+pub fn preview_plan(name: &str, size: Option<u64>, cap: u64) -> PreviewPlan {
+    if let Some(sz) = size {
+        if sz > cap {
+            return PreviewPlan::TooLarge { size: sz, cap };
+        }
+    }
+    let ext = match ext_of(name) {
+        None => return PreviewPlan::Text, // extensionless (Makefile, README) → text
+        Some(e) => e,
+    };
+    const IMAGE: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
+    const TEXT: &[&str] = &[
+        "txt", "md", "markdown", "log", "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml",
+        "csv", "tsv", "sh", "bash", "zsh", "fish", "py", "rs", "go", "c", "h", "cpp", "hpp", "cc",
+        "js", "ts", "tsx", "jsx", "svelte", "html", "css", "scss", "sql", "env", "gitignore",
+        "dockerfile",
+    ];
+    if IMAGE.contains(&ext.as_str()) {
+        PreviewPlan::Image
+    } else if ext == "pdf" {
+        PreviewPlan::Pdf
+    } else if TEXT.contains(&ext.as_str()) {
+        PreviewPlan::Text
+    } else {
+        PreviewPlan::Unsupported { ext }
+    }
+}
+
+/// MIME for an image extension (drives the preview `data:` URL).
+pub fn image_mime(name: &str) -> &'static str {
+    match ext_of(name).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("ico") => "image/x-icon",
+        Some("svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +263,40 @@ mod tests {
             check_conflict(&b, "/r.txt", &base).await.unwrap(),
             ConflictCheck::Clear
         );
+    }
+
+    #[test]
+    fn preview_plan_classifies_by_extension() {
+        assert_eq!(
+            preview_plan("notes.txt", Some(10), PREVIEW_CAP_BYTES),
+            PreviewPlan::Text
+        );
+        assert_eq!(
+            preview_plan("Makefile", Some(10), PREVIEW_CAP_BYTES),
+            PreviewPlan::Text
+        ); // no ext → text
+        assert_eq!(
+            preview_plan("logo.PNG", Some(10), PREVIEW_CAP_BYTES),
+            PreviewPlan::Image
+        ); // case-insensitive
+        assert_eq!(
+            preview_plan("report.pdf", Some(10), PREVIEW_CAP_BYTES),
+            PreviewPlan::Pdf
+        );
+        assert_eq!(
+            preview_plan("archive.zip", Some(10), PREVIEW_CAP_BYTES),
+            PreviewPlan::Unsupported { ext: "zip".into() }
+        );
+    }
+
+    #[test]
+    fn preview_plan_size_guard_wins_over_type() {
+        let cap = 1000;
+        assert_eq!(
+            preview_plan("big.txt", Some(5000), cap),
+            PreviewPlan::TooLarge { size: 5000, cap }
+        );
+        // unknown size → allowed (the command still caps the actual read)
+        assert_eq!(preview_plan("x.txt", None, cap), PreviewPlan::Text);
     }
 }
