@@ -141,15 +141,14 @@ impl EditRegistry {
         // sibling temp and renaming over the original would orphan a file watch.
         let watched = temp_path.parent().unwrap_or(&temp_path).to_path_buf();
         let watch_target = temp_path.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                if let Ok(ev) = res {
-                    if ev.paths.iter().any(|p| p == &watch_target) {
-                        let _ = tx.send(());
-                    }
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(ev) = res {
+                if ev.paths.iter().any(|p| p == &watch_target) {
+                    let _ = tx.send(());
                 }
-            })
-            .map_err(StorageError::other)?;
+            }
+        })
+        .map_err(StorageError::other)?;
         watcher
             .watch(&watched, RecursiveMode::NonRecursive)
             .map_err(StorageError::other)?;
