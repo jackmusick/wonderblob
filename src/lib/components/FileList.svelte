@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { api, type Entry, type StorageError } from "../api";
+  import { api, type Entry } from "../api";
+  import { describeError } from "../errors";
   import { formatMtime, formatSize } from "../format";
   import { activeConnection, currentPath } from "../stores/session";
 
@@ -14,7 +15,12 @@
   let renamingPath = $state<string | null>(null);
   let renameValue = $state("");
 
-  let listEl: HTMLDivElement | null = null;
+  // FOCUS INVARIANT: keyboard focus always lives on containerEl (tabindex 0).
+  // Rows use tabindex -1 so they never receive DOM focus. After any re-render
+  // (descend, parent-nav, delete, rename, refresh) we call containerEl.focus()
+  // if focus was already inside the list, keeping arrow/Enter/Backspace working
+  // without requiring the user to click again.
+  let containerEl: HTMLDivElement | null = null;
   let renameInput = $state<HTMLInputElement | null>(null);
   let seq = 0;
   let spinnerTimer: ReturnType<typeof setTimeout> | null = null;
@@ -36,18 +42,15 @@
     }
   });
 
-  function errorInfo(e: unknown): { message: string; detail: string } {
-    const err = e as StorageError;
-    const detail = typeof err?.detail === "string" ? err.detail : String(e);
-    switch (err?.kind) {
-      case "permissionDenied":
-        return { message: "You don't have permission to view this folder.", detail };
-      case "network":
-        return { message: "Can't reach the server.", detail };
-      case "authFailed":
-        return { message: "Authentication failed.", detail };
-      default:
-        return { message: "Something went wrong loading this folder.", detail };
+  /** True when focus is inside the list container (used to restore after re-render). */
+  function listHasFocus(): boolean {
+    return !!containerEl && containerEl.contains(document.activeElement);
+  }
+
+  /** Restore focus to the container if it was already there (keeps keyboard flow intact). */
+  function restoreFocus() {
+    if (listHasFocus() || document.activeElement === containerEl) {
+      containerEl?.focus();
     }
   }
 
@@ -61,6 +64,7 @@
     spinnerTimer = setTimeout(() => {
       if (loading && mySeq === seq) showSpinner = true;
     }, 200);
+    const hadFocus = listHasFocus();
     try {
       const result = await api.listDir(id, path);
       if (mySeq !== seq) return;
@@ -70,12 +74,17 @@
       if (mySeq !== seq) return;
       entries = [];
       selectedIndex = -1;
-      error = errorInfo(e);
+      const msg = describeError(e, "list");
+      const err = e as { detail?: unknown };
+      const detail = typeof err?.detail === "string" ? err.detail : String(e);
+      error = { message: msg, detail };
     } finally {
       if (mySeq === seq) {
         loading = false;
         showSpinner = false;
         if (spinnerTimer) clearTimeout(spinnerTimer);
+        // Restore keyboard focus if it was inside the list before the re-render.
+        if (hadFocus) requestAnimationFrame(() => containerEl?.focus());
       }
     }
   }
@@ -112,7 +121,7 @@
 
   function scrollSelectedIntoView() {
     requestAnimationFrame(() => {
-      listEl
+      containerEl
         ?.querySelector('[aria-selected="true"]')
         ?.scrollIntoView({ block: "nearest" });
     });
@@ -143,7 +152,7 @@
       await api.deleteEntry(conn.id, entry.path);
       refresh();
     } catch (e) {
-      onerror?.(errorInfo(e).message);
+      onerror?.(describeError(e, "mutate"));
     }
   }
 
@@ -156,14 +165,14 @@
     const conn = $activeConnection;
     const newName = renameValue.trim();
     cancelRename();
-    listEl?.focus();
+    containerEl?.focus();
     if (!conn || !newName || newName === entry.name) return;
     const to = `${parentOf(entry.path)}/${newName}`.replace(/^\/+/, "/");
     try {
       await api.renameEntry(conn.id, entry.path, to);
       refresh();
     } catch (e) {
-      onerror?.(errorInfo(e).message);
+      onerror?.(describeError(e, "mutate"));
     }
   }
 
@@ -197,7 +206,8 @@
     } else if (e.key === "Delete" && selected) {
       e.preventDefault();
       requestDelete(selected);
-    } else if ((e.key === "F2" || e.key === "e") && selected && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    } else if (e.key === "F2" && selected && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // F2 only – bare letter keys are reserved for type-ahead (matches desktop conventions).
       e.preventDefault();
       startRename(selected);
     } else if (e.key === "Escape") {
@@ -215,13 +225,20 @@
     } else if (e.key === "Escape") {
       e.preventDefault();
       cancelRename();
-      listEl?.focus();
+      containerEl?.focus();
     }
     e.stopPropagation();
   }
 </script>
 
-<div class="filelist" bind:this={listEl} role="listbox" aria-label="Files" tabindex="0" onkeydown={onkeydown}>
+<div
+  class="filelist"
+  bind:this={containerEl}
+  role="listbox"
+  aria-label="Files"
+  tabindex="0"
+  onkeydown={onkeydown}
+>
   <div class="header" role="presentation">
     <span class="col-name">Name</span>
     <span class="col-size">Size</span>
@@ -248,8 +265,11 @@
         onclick={() => {
           selectedIndex = i;
           cancelConfirm();
+          // Keep DOM focus on the container so keyboard flow continues
+          // without needing a second click (focus invariant).
+          containerEl?.focus();
         }}
-        ondblclick={() => open(entry)}
+        ondblclick={() => { open(entry); containerEl?.focus(); }}
         onkeydown={() => {}}
       >
         <span class="col-name">

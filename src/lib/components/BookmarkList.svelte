@@ -95,7 +95,8 @@
     } else if (e.key === "Delete" && focusedIndex >= 0) {
       e.preventDefault();
       requestDelete(bookmarks[focusedIndex]);
-    } else if ((e.key === "F2" || e.key === "e") && focusedIndex >= 0) {
+    } else if (e.key === "F2" && focusedIndex >= 0) {
+      // F2 only – matches desktop conventions; bare 'e' is not bound here.
       e.preventDefault();
       onedit(bookmarks[focusedIndex]);
     }

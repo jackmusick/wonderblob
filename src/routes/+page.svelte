@@ -1,6 +1,7 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { api, type Bookmark, type StorageError } from "$lib/api";
+  import { api, type Bookmark } from "$lib/api";
+  import { describeError } from "$lib/errors";
   import BookmarkList from "$lib/components/BookmarkList.svelte";
   import Breadcrumb from "$lib/components/Breadcrumb.svelte";
   import ConnectionSheet from "$lib/components/ConnectionSheet.svelte";
@@ -44,19 +45,8 @@
   }
 
   function opError(e: unknown, fallback: string): string {
-    const err = e as StorageError;
-    switch (err?.kind) {
-      case "permissionDenied":
-        return `${fallback}: permission denied.`;
-      case "network":
-        return `${fallback}: can't reach the server.`;
-      case "quotaExceeded":
-        return `${fallback}: not enough space.`;
-      case "conflict":
-        return `${fallback}: name already exists.`;
-      default:
-        return `${fallback}.`;
-    }
+    const msg = describeError(e, "mutate");
+    return `${fallback}: ${msg.replace(/^Operation failed[.: ]*/, "").trim() || "unexpected error."}`;
   }
 
   function joinPath(dir: string, name: string): string {
