@@ -22,10 +22,15 @@ azure_core = "=1.0.0"
 base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+# OneDrive (Graph REST over reqwest). rustls-tls avoids a system OpenSSL dep.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde_json = { workspace = true }
+tempfile = "3"
 
 [dev-dependencies]
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+wiremock = "0.6"
