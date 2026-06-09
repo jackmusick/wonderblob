@@ -210,6 +210,7 @@ export const api = {
   cancelTransfer: (transferId: number) => invoke<void>("cancel_transfer", { transferId }),
   listTransfers: () => invoke<Transfer[]>("list_transfers"),
   clearCompleted: () => invoke<number>("clear_completed"),
+  clearTransfer: (transferId: number) => invoke<void>("clear_transfer", { transferId }),
   deleteEntry: (id: number, path: string) => invoke<void>("delete_entry", { id, path }),
   renameEntry: (id: number, from: string, to: string) =>
     invoke<void>("rename_entry", { id, from, to }),

@@ -189,7 +189,9 @@ impl SftpBackend {
                 .map_err(|e| StorageError::Network {
                     detail: e.to_string(),
                 })?,
-            SftpAuth::Agent => authenticate_agent(&mut session, &cfg.username).await?,
+            SftpAuth::Agent => {
+                authenticate_agent(&mut session, &cfg.username, &cfg.host).await?
+            }
             SftpAuth::KeyFile { path, passphrase } => {
                 authenticate_keyfile(&mut session, &cfg.username, path, passphrase.as_deref())
                     .await?
@@ -224,16 +226,34 @@ impl SftpBackend {
     }
 }
 
-/// Authenticate via the SSH agent at SSH_AUTH_SOCK (1Password, KeePassXC,
-/// OpenSSH ssh-agent, ...). Tries every identity the agent offers; the first
-/// one the server accepts wins. Signing happens inside the agent — private
-/// keys never touch this process.
-async fn authenticate_agent(session: &mut client::Handle<Handler>, user: &str) -> Result<bool> {
-    let mut agent = russh_keys::agent::client::AgentClient::connect_env()
-        .await
-        .map_err(|e| StorageError::AuthFailed {
-            detail: format!("cannot reach ssh-agent (is SSH_AUTH_SOCK set?): {e}"),
-        })?;
+/// Authenticate via the SSH agent (1Password, KeePassXC, OpenSSH ssh-agent,
+/// ...). The socket is resolved the way `ssh` resolves it — honoring
+/// `IdentityAgent` from `~/.ssh/config` for `host`, falling back to
+/// `$SSH_AUTH_SOCK`. Tries every identity the agent offers; the first one the
+/// server accepts wins. Signing happens inside the agent — private keys never
+/// touch this process.
+async fn authenticate_agent(
+    session: &mut client::Handle<Handler>,
+    user: &str,
+    host: &str,
+) -> Result<bool> {
+    use russh_keys::agent::client::AgentClient;
+    let mut agent = match crate::ssh_agent::resolve_agent_socket(host) {
+        // ssh_config's IdentityAgent wins over the environment, just like ssh.
+        Some(path) => AgentClient::connect_uds(&path).await.map_err(|e| {
+            StorageError::AuthFailed {
+                detail: format!(
+                    "cannot reach ssh-agent at {} (from ssh_config IdentityAgent): {e}",
+                    path.display()
+                ),
+            }
+        })?,
+        None => AgentClient::connect_env()
+            .await
+            .map_err(|e| StorageError::AuthFailed {
+                detail: format!("cannot reach ssh-agent (is SSH_AUTH_SOCK set?): {e}"),
+            })?,
+    };
     let identities = agent
         .request_identities()
         .await

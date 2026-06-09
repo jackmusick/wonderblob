@@ -49,6 +49,7 @@ pub fn run() {
             commands::cancel_transfer,
             commands::list_transfers,
             commands::clear_completed,
+            commands::clear_transfer,
             commands::delete_entry,
             commands::rename_entry,
             commands::make_dir,

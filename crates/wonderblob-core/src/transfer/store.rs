@@ -184,10 +184,24 @@ impl TransferStore {
         Ok(())
     }
 
-    /// Remove completed rows; returns the number pruned.
+    /// Remove every *finished* transfer — completed, canceled, or failed.
+    /// (Name is historical; the UI labels it "Clear finished".) Running, paused,
+    /// and queued transfers are left untouched. Returns the number pruned.
     pub fn clear_completed(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM transfers WHERE status = 'completed'", [])
+        conn.execute(
+            "DELETE FROM transfers WHERE status IN ('completed', 'canceled', 'failed')",
+            [],
+        )
+        .map_err(map_db)
+    }
+
+    /// Force-remove a single transfer row regardless of status — the escape
+    /// hatch for a row wedged in a non-terminal state that "Clear finished"
+    /// can't reach. Returns the number removed (0 or 1).
+    pub fn clear_one(&self, id: TransferId) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM transfers WHERE id = ?1", params![id])
             .map_err(map_db)
     }
 }

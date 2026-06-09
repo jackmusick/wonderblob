@@ -477,6 +477,10 @@ impl TransferEngine {
         self.store.clear_completed()
     }
 
+    pub fn clear_one(&self, id: TransferId) -> crate::error::Result<usize> {
+        self.store.clear_one(id)
+    }
+
     pub fn list(&self) -> crate::error::Result<Vec<Transfer>> {
         self.store.list()
     }

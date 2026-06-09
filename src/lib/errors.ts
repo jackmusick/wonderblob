@@ -27,10 +27,19 @@ export function errorDetail(e: unknown): string {
 export function describeError(e: unknown, ctx: ErrorContext): string {
   const err = e as StorageError;
   switch (err?.kind) {
-    case "authFailed":
-      return ctx === "list"
-        ? "Authentication failed."
-        : "Operation failed: authentication error.";
+    case "authFailed": {
+      // Surface the backend's detail — for agent/key auth it carries the actual
+      // reason ("ssh-agent has no identities loaded", "cannot reach ssh-agent
+      // at …", "all auth methods rejected for …"), which is exactly what the
+      // user needs to fix the problem. Swallowing it left every failure an
+      // indistinguishable "Authentication failed."
+      const base =
+        ctx === "list"
+          ? "Authentication failed."
+          : "Operation failed: authentication error.";
+      const detail = errorDetail(e);
+      return detail ? `${base} ${detail}` : base;
+    }
     case "network":
       return ctx === "list"
         ? "Can't reach the server."

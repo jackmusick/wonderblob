@@ -8,9 +8,12 @@
   import Breadcrumb from "$lib/components/Breadcrumb.svelte";
   import ConflictModal from "$lib/components/ConflictModal.svelte";
   import ConnectionSheet from "$lib/components/ConnectionSheet.svelte";
+  import ContextMenu, { type MenuItem } from "$lib/components/ContextMenu.svelte";
   import EditSessions from "$lib/components/EditSessions.svelte";
   import FileList from "$lib/components/FileList.svelte";
+  import Icon from "$lib/components/Icon.svelte";
   import PreviewOverlay from "$lib/components/PreviewOverlay.svelte";
+  import Settings from "$lib/components/Settings.svelte";
   import TransfersPanel from "$lib/components/TransfersPanel.svelte";
   import { activeConnection, currentPath } from "$lib/stores/session";
   import { editConflicts, initEdit } from "$lib/stores/edit";
@@ -29,6 +32,43 @@
   let uploading = $state(false);
 
   let transfersOpen = $state(false);
+  let settingsOpen = $state(false);
+
+  // Resizable sidebar (persisted; defaults wider than the old fixed 240px).
+  let sidebarWidth = $state(280);
+  $effect(() => {
+    const saved = Number(localStorage.getItem("wb:sidebarWidth"));
+    if (saved >= 180 && saved <= 600) sidebarWidth = saved;
+  });
+  function startSidebarResize(e: PointerEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    const onMove = (ev: PointerEvent) => {
+      sidebarWidth = Math.min(600, Math.max(180, startW + (ev.clientX - startX)));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      localStorage.setItem("wb:sidebarWidth", String(Math.round(sidebarWidth)));
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  // Right-click menu for the Download toolbar icon (primary click = ~/Downloads).
+  let downloadMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  function openDownloadMenu(e: MouseEvent) {
+    e.preventDefault();
+    downloadMenu = {
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        { label: "Download to ~/Downloads", icon: "download", action: downloadToDownloads },
+        { label: "Download As…", icon: "download", action: download },
+      ],
+    };
+  }
 
   // True while OS files are dragged over the window — drives the drop highlight.
   let dragOver = $state(false);
@@ -73,7 +113,7 @@
   // Start the edit store once (reconcile + subscribe to edit:// events).
   $effect(() => {
     initEdit({
-      onSaved: (name) => showToast(`Saved “${name}”`),
+      onSaved: (name) => showToast(`Saved “${name}”`, "info"),
       onError: showToast,
     });
   });
@@ -90,6 +130,7 @@
   });
 
   let toast = $state<string | null>(null);
+  let toastKind = $state<"error" | "info">("error");
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
   let copied = $state<string | null>(null);
@@ -112,8 +153,12 @@
     await list?.reload();
   }
 
-  function showToast(message: string) {
+  // Default kind is "error" (red) — most callers are failures. Successes and
+  // gentle prompts pass "info" so a "Saved"/"Downloading" message doesn't read
+  // as a failure.
+  function showToast(message: string, kind: "error" | "info" = "error") {
     toast = message;
+    toastKind = kind;
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => (toast = null), 5000);
   }
@@ -185,7 +230,7 @@
     if (!conn) return;
     const entry = fileList?.selected() ?? null;
     if (!entry || entry.kind === "dir") {
-      showToast("Select a file to share.");
+      showToast("Select a file to share.", "info");
       return;
     }
     try {
@@ -204,7 +249,7 @@
     if (!conn) return;
     const entry = fileList?.selected() ?? null;
     if (!entry || entry.kind === "dir") {
-      showToast("Select a file to download.");
+      showToast("Select a file to download.", "info");
       return;
     }
     const dest = await save({ defaultPath: entry.name, title: "Download to…" });
@@ -224,13 +269,13 @@
     if (!conn) return;
     const entry = fileList?.selected() ?? null;
     if (!entry || entry.kind === "dir") {
-      showToast("Select a file to download.");
+      showToast("Select a file to download.", "info");
       return;
     }
     try {
       await api.enqueueDownloadToDownloads(conn.id, entry.path, entry.size ?? undefined);
       transfersOpen = true; // reveal progress
-      showToast(`Downloading “${entry.name}” to Downloads`);
+      showToast(`Downloading “${entry.name}” to Downloads`, "info");
     } catch (e) {
       showToast(opError(e, "Couldn't start download"));
     }
@@ -246,9 +291,22 @@
 </script>
 
 <div class="shell">
-  <aside class="sidebar">
-    <BookmarkList bind:this={list} onnew={openNew} onedit={openEdit} />
+  <aside class="sidebar" style="width:{sidebarWidth}px">
+    <BookmarkList
+      bind:this={list}
+      onnew={openNew}
+      onedit={openEdit}
+      onsettings={() => (settingsOpen = true)}
+    />
   </aside>
+  <div
+    class="splitter"
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Resize sidebar"
+    tabindex="-1"
+    onpointerdown={startSidebarResize}
+  ></div>
   <main class="content">
     {#if $activeConnection}
       <div class="toolbar">
@@ -265,23 +323,48 @@
               onblur={() => (newFolderOpen = false)}
             />
           {:else}
-            <button class="ghost" onclick={openNewFolder}>New Folder</button>
+            <button class="icon-btn" title="New folder" aria-label="New folder" onclick={openNewFolder}>
+              <Icon name="folder-plus" />
+            </button>
           {/if}
-          <button class="ghost" onclick={upload} disabled={uploading}>
-            {uploading ? "Uploading…" : "Upload"}
+          <button
+            class="icon-btn"
+            title="Upload files"
+            aria-label="Upload files"
+            onclick={upload}
+            disabled={uploading}
+          >
+            <Icon name="upload" />
           </button>
-          <button class="ghost" onclick={download}>Download</button>
-          <button class="ghost" onclick={downloadToDownloads} title="Download to ~/Downloads">
-            To Downloads
+          <button
+            class="icon-btn"
+            title="Download to ~/Downloads (right-click for Download As…)"
+            aria-label="Download"
+            onclick={downloadToDownloads}
+            oncontextmenu={openDownloadMenu}
+          >
+            <Icon name="download" />
           </button>
           {#if $activeConnection?.capabilities.canPresign}
-            <button class="ghost" onclick={shareSelected}>Share Link</button>
+            <button class="icon-btn" title="Copy share link" aria-label="Share link" onclick={shareSelected}>
+              <Icon name="share" />
+            </button>
           {/if}
+          <span class="sep"></span>
           <EditSessions />
-          <button class="ghost" onclick={() => (transfersOpen = !transfersOpen)}>
-            Transfers{#if $activeTransferCount > 0} ({$activeTransferCount}){/if}
+          <button
+            class="icon-btn"
+            class:on={transfersOpen}
+            title="Transfers"
+            aria-label="Transfers"
+            onclick={() => (transfersOpen = !transfersOpen)}
+          >
+            <Icon name="transfers" />
+            {#if $activeTransferCount > 0}<span class="badge">{$activeTransferCount}</span>{/if}
           </button>
-          <button class="ghost" onclick={disconnect}>Disconnect</button>
+          <button class="icon-btn" title="Disconnect" aria-label="Disconnect" onclick={disconnect}>
+            <Icon name="power" />
+          </button>
         </div>
       </div>
       <div class="browser" class:drop-target={dragOver}>
@@ -289,6 +372,11 @@
           bind:this={fileList}
           onerror={showToast}
           onpreview={(e) => (previewEntry = e)}
+          onDownload={downloadToDownloads}
+          onDownloadAs={download}
+          onShare={shareSelected}
+          onNewFolder={openNewFolder}
+          onUpload={upload}
         />
         {#if previewEntry && $activeConnection}
           <PreviewOverlay
@@ -305,7 +393,13 @@
         </div>
       {/if}
       {#if toast}
-        <div class="toast" role="alert">{toast}</div>
+        <div
+          class="toast"
+          class:info={toastKind === "info"}
+          role={toastKind === "info" ? "status" : "alert"}
+        >
+          {toast}
+        </div>
       {/if}
       {#if copied}
         <div class="copied" role="status">{copied}</div>
@@ -323,18 +417,44 @@
   <ConnectionSheet bookmark={editing} onclose={closeSheet} onsaved={onSaved} />
 {/if}
 
+{#if settingsOpen}
+  <Settings onclose={() => (settingsOpen = false)} />
+{/if}
+
 {#if $editConflicts.length > 0}
   <ConflictModal session={$editConflicts[0]} />
+{/if}
+
+{#if downloadMenu}
+  <ContextMenu
+    x={downloadMenu.x}
+    y={downloadMenu.y}
+    items={downloadMenu.items}
+    onclose={() => (downloadMenu = null)}
+  />
 {/if}
 
 <style>
   .shell { display: flex; height: 100vh; }
   .sidebar {
-    width: var(--sidebar-width);
     background: var(--bg-sidebar);
-    border-right: 1px solid var(--border);
     padding: 8px;
     flex-shrink: 0;
+    overflow-y: auto;
+  }
+  /* Drag handle between sidebar and content. */
+  .splitter {
+    width: 5px;
+    margin-left: -3px;
+    flex-shrink: 0;
+    cursor: col-resize;
+    background: var(--border);
+    background-clip: content-box;
+    border-left: 2px solid transparent;
+    z-index: 5;
+  }
+  .splitter:hover {
+    border-left-color: var(--accent);
   }
   .content { flex: 1; display: flex; flex-direction: column; background: var(--bg-content); min-width: 0; }
   .toolbar {
@@ -352,23 +472,51 @@
     gap: 4px;
     flex-shrink: 0;
   }
-  .ghost {
-    height: 24px;
-    padding: 0 9px;
-    font-size: var(--text-base);
-    font-family: var(--font-ui);
+  .icon-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
     color: var(--fg-secondary);
     background: transparent;
     border: none;
     border-radius: var(--radius);
-    white-space: nowrap;
+    flex-shrink: 0;
   }
-  .ghost:hover:not(:disabled) {
+  .icon-btn:hover:not(:disabled) {
     background: var(--bg-hover);
     color: var(--fg-primary);
   }
-  .ghost:disabled {
+  .icon-btn.on {
+    background: var(--bg-selected);
+    color: var(--accent);
+  }
+  .icon-btn:disabled {
     opacity: 0.55;
+  }
+  .badge {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 600;
+    color: #fff;
+    background: var(--accent);
+    border-radius: 7px;
+  }
+  .actions .sep {
+    width: 1px;
+    height: 18px;
+    margin: 0 2px;
+    background: var(--border);
   }
   .folder-input {
     width: 160px;
@@ -409,6 +557,11 @@
     color: var(--danger);
     border-top: 1px solid var(--border);
     background: var(--bg-content);
+  }
+  /* Info/success — neutral, not the red that reads as a failure. */
+  .toast.info {
+    color: var(--fg-primary);
+    background: var(--bg-selected);
   }
   .copied {
     flex-shrink: 0;

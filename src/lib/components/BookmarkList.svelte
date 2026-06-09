@@ -8,13 +8,17 @@
   } from "../api";
   import { activeConnection, currentPath } from "../stores/session";
   import HostKeyDialog from "./HostKeyDialog.svelte";
+  import Icon from "./Icon.svelte";
+  import ContextMenu, { type MenuItem } from "./ContextMenu.svelte";
 
   let {
     onnew,
     onedit,
+    onsettings,
   }: {
     onnew: () => void;
     onedit: (b: Bookmark) => void;
+    onsettings?: () => void;
   } = $props();
 
   let bookmarks = $state<Bookmark[]>([]);
@@ -23,22 +27,74 @@
   let errors = $state<Record<string, { message: string; detail: string }>>({});
   let confirmingDeleteId = $state<string | null>(null);
   let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+  let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
   export async function reload() {
     bookmarks = await api.bookmarksList();
   }
 
-  function protoBadge(p: Bookmark["protocol"]): string {
+  function protoIcon(p: Bookmark["protocol"]): string {
     switch (p) {
       case "sftp":
-        return "SFTP";
+        return "sftp";
       case "s3":
-        return "S3";
+        return "s3";
       case "azBlob":
-        return "Azure";
+        return "azure";
       case "oneDrive":
-        return "OneDrive";
+        return "onedrive";
     }
+  }
+
+  // Real brand colors for the protocol glyphs — the vibrant spot of colour in
+  // the (otherwise near-black) sidebar. Tuned a touch brighter than the official
+  // hexes so they sing against the dark plane. Deliberately none of them green:
+  // green is reserved as the "connected" status cue and overrides these.
+  function brandColor(p: Bookmark["protocol"]): string {
+    switch (p) {
+      case "sftp":
+        return "#e0a24e"; // Tux amber
+      case "s3":
+        return "#ff9a2e"; // AWS orange
+      case "azBlob":
+        return "#3a9bef"; // Azure blue
+      case "oneDrive":
+        return "#4aa8ee"; // OneDrive blue
+    }
+  }
+
+  /** Tear down the active connection (mirrors the old toolbar Disconnect). */
+  function disconnectActive() {
+    const active = $activeConnection;
+    if (!active) return;
+    activeConnection.set(null);
+    currentPath.set("/");
+    api.disconnect(active.id).catch(() => {});
+  }
+
+  /** Single click toggles: connect, or disconnect if already the live one. */
+  function toggle(b: Bookmark) {
+    if ($activeConnection?.bookmark.id === b.id) disconnectActive();
+    else connect(b);
+  }
+
+  function rowMenuItems(b: Bookmark): MenuItem[] {
+    const isActive = $activeConnection?.bookmark.id === b.id;
+    return [
+      isActive
+        ? { label: "Disconnect", icon: "power", action: () => disconnectActive() }
+        : { label: "Connect", icon: "power", action: () => connect(b) },
+      { label: "Edit…", icon: "pencil", action: () => onedit(b) },
+      { separator: true },
+      { label: "Delete", icon: "trash", danger: true, action: () => doDelete(b) },
+    ];
+  }
+
+  function openRowMenu(e: MouseEvent, i: number, b: Bookmark) {
+    e.preventDefault();
+    e.stopPropagation();
+    focusedIndex = i;
+    menu = { x: e.clientX, y: e.clientY, items: rowMenuItems(b) };
   }
 
   function rowTitle(b: Bookmark): string {
@@ -171,9 +227,16 @@
 
 <div class="section-header">
   <span class="section-label">Connections</span>
-  <button class="icon-btn" title="New connection" aria-label="New connection" onclick={onnew}>
-    +
-  </button>
+  <span class="header-actions">
+    {#if onsettings}
+      <button class="icon-btn header-add" title="Settings" aria-label="Settings" onclick={onsettings}>
+        <Icon name="settings" size={16} />
+      </button>
+    {/if}
+    <button class="icon-btn header-add" title="New connection" aria-label="New connection" onclick={onnew}>
+      <Icon name="plus" size={16} />
+    </button>
+  </span>
 </div>
 
 <div
@@ -193,16 +256,37 @@
         role="option"
         aria-selected={selected}
         tabindex="-1"
-        ondblclick={() => connect(b)}
-        onclick={() => (focusedIndex = i)}
+        onclick={() => {
+          focusedIndex = i;
+          toggle(b);
+        }}
+        oncontextmenu={(e) => openRowMenu(e, i, b)}
         onkeydown={() => {}}
       >
+        <span
+          class="proto"
+          class:connected={selected}
+          style={selected ? undefined : `color:${brandColor(b.protocol)}`}
+          aria-hidden="true"
+        >
+          <Icon name={protoIcon(b.protocol)} size={16} />
+        </span>
         <span class="label" title={rowTitle(b)}>{b.label}</span>
-        <span class="badge">{protoBadge(b.protocol)}</span>
         {#if connectingId === b.id}
           <span class="hint">connecting…</span>
         {:else}
           <span class="row-actions">
+            {#if selected}
+              <button
+                class="icon-btn"
+                title="Disconnect"
+                aria-label="Disconnect {b.label}"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  disconnectActive();
+                }}><Icon name="power" size={15} /></button
+              >
+            {/if}
             <button
               class="icon-btn"
               title="Edit"
@@ -210,7 +294,7 @@
               onclick={(e) => {
                 e.stopPropagation();
                 onedit(b);
-              }}>✎</button
+              }}><Icon name="pencil" size={15} /></button
             >
             <button
               class="icon-btn"
@@ -220,8 +304,10 @@
               onclick={(e) => {
                 e.stopPropagation();
                 requestDelete(b);
-              }}>{confirmingDeleteId === b.id ? "Delete?" : "×"}</button
+              }}
             >
+              {#if confirmingDeleteId === b.id}Delete?{:else}<Icon name="trash" size={15} />{/if}
+            </button>
           </span>
         {/if}
       </div>
@@ -231,6 +317,10 @@
     </div>
   {/each}
 </div>
+
+{#if menu}
+  <ContextMenu x={menu.x} y={menu.y} items={menu.items} onclose={() => (menu = null)} />
+{/if}
 
 {#if hostKeyPrompt}
   <HostKeyDialog
@@ -258,6 +348,11 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
   .list {
     outline: none;
     border-radius: var(--radius);
@@ -275,12 +370,30 @@
   .row:hover {
     background: var(--bg-hover);
   }
+  /* Selected = the live connection. A vibrant rounded pill with an accent bar
+     down the leading edge (1Password-style), so the active server is obvious
+     even against the dark sidebar. */
   .row.selected {
     background: var(--bg-selected);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .row.selected .label {
+    font-weight: 600;
   }
   .list:focus .row.focused {
     outline: 1px solid var(--accent);
     outline-offset: -1px;
+  }
+  .proto {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    color: var(--fg-secondary);
+  }
+  /* Connected = the protocol icon turns green (the single status cue; no dot).
+     Wins over the per-brand colour set inline on the disconnected glyph. */
+  .proto.connected {
+    color: var(--success);
   }
   .label {
     flex: 1;
@@ -288,25 +401,12 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: var(--text-base);
+    font-weight: var(--weight-label);
     color: var(--fg-primary);
   }
   .hint {
     font-size: var(--text-small);
     color: var(--fg-secondary);
-  }
-  .badge {
-    flex-shrink: 0;
-    padding: 0 5px;
-    font-size: var(--text-small);
-    color: var(--fg-secondary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    line-height: 16px;
-  }
-  /* Hide the badge while the row shows its hover actions, to avoid crowding. */
-  .row:hover .badge,
-  .row:focus-within .badge {
-    display: none;
   }
   /* Hidden until hover or keyboard focus lands inside the row, but the
      buttons stay rendered so they remain in the tab order. */
@@ -336,6 +436,13 @@
   .icon-btn:hover {
     background: var(--bg-hover);
     color: var(--fg-primary);
+  }
+  /* The header "+" is a clean square, not a text-padded action button. */
+  .header-add {
+    width: 22px;
+    height: 22px;
+    min-width: 0;
+    padding: 0;
   }
   .icon-btn.confirming {
     color: var(--fg-primary);

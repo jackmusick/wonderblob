@@ -572,6 +572,17 @@ pub async fn clear_completed(
     engine.clear_completed()
 }
 
+/// Force-remove one transfer regardless of status (per-row dismiss) — the escape
+/// hatch for a row wedged in a non-terminal state.
+#[tauri::command]
+pub async fn clear_transfer(
+    engine: State<'_, Arc<TransferEngine>>,
+    transfer_id: TransferId,
+) -> Result<(), StorageError> {
+    engine.clear_one(transfer_id)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Bookmarks
 // ---------------------------------------------------------------------------

@@ -1,0 +1,60 @@
+# Flatpak manifest — the Linux bundle (one install, real menu integration).
+#
+# Local build + run (needs the deb next to this file, named wonderblob.deb):
+#   cp target/release/bundle/deb/Wonderblob_*_amd64.deb \
+#     packaging/flatpak/wonderblob.deb
+#   flatpak-builder --user --install --force-clean build-dir \
+#     packaging/flatpak/com.wonderblob.app.yml
+#   flatpak run com.wonderblob.app
+#
+# Unlike a from-source manifest, this does NOT compile Rust/JS in the sandbox —
+# it unpacks the prebuilt .deb and relies on org.gnome.Platform for
+# webkit2gtk-4.1. Verify the runtime-version below actually ships webkit2gtk
+# (bump if the app fails to launch from the built bundle).
+app-id: com.wonderblob.app
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+command: wonderblob
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Every backend talks to the network: S3, Azure Blob, SFTP, OneDrive (Graph).
+  - --share=network
+  # OneDrive sign-in opens the browser; opening a file in the user's editor
+  # (EditSession) also rides OpenURI.
+  - --talk-name=org.freedesktop.portal.OpenURI
+  # "To Downloads" writes ~/Downloads directly (no save dialog). Regular
+  # open/save dialogs go through the file-chooser portal — no broad fs grant.
+  - --filesystem=xdg-download
+
+modules:
+  - name: wonderblob
+    buildsystem: simple
+    build-commands:
+      # Unpack the Debian package: ar -> data.tar.* -> usr/ tree.
+      - ar x wonderblob.deb
+      - mkdir -p deb-root
+      - tar -xf data.tar.* -C deb-root
+      # Binary.
+      - install -Dm755 deb-root/usr/bin/wonderblob ${FLATPAK_DEST}/bin/wonderblob
+      # Desktop file, renamed to the app-id with Icon= pointed at the app-id.
+      - |
+        src_desktop=$(ls deb-root/usr/share/applications/*.desktop | head -n1)
+        sed 's/^Icon=.*/Icon=com.wonderblob.app/' "$src_desktop" \
+          > ${FLATPAK_ID}.desktop
+        install -Dm644 ${FLATPAK_ID}.desktop \
+          ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      # Icons: copy every size/format the deb shipped, renamed to the app-id.
+      - |
+        for icon in $(find deb-root/usr/share/icons -type f); do
+          dir=$(dirname "$icon" | sed 's|deb-root/usr/share/icons|share/icons|')
+          ext="${icon##*.}"
+          install -Dm644 "$icon" "${FLATPAK_DEST}/${dir}/${FLATPAK_ID}.${ext}"
+        done
+    sources:
+      - type: file
+        path: wonderblob.deb

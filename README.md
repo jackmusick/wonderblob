@@ -3,7 +3,7 @@
 A fast, native-feeling remote file browser for Linux, macOS, and Windows — in the
 spirit of Cyberduck, built with Tauri and Rust.
 
-> **Status: v0.6.0 — first distributable release (unsigned).** SFTP (with SSH
+> **Status: v0.1.0 — first release (unsigned).** SFTP (with SSH
 > host-key verification), S3, Azure Blob Storage, and OneDrive for Business all
 > work end-to-end, with a resumable transfer queue, open-remote-files-locally
 > editing, and OS drag & drop.
@@ -14,7 +14,7 @@ Cyberduck is great, but it doesn't run on Linux. Wonderblob aims to be the
 cross-platform equivalent: a single-pane remote file browser that feels like a
 real desktop app — keyboard-first, dense, quiet — not a web page in a frame.
 
-## Features (today)
+## Features
 
 - **SFTP** browsing, upload/download, rename, delete, new folder
 - **SSH agent authentication** — works out of the box with 1Password,
@@ -32,15 +32,41 @@ real desktop app — keyboard-first, dense, quiet — not a web page in a frame.
 
 ## Install
 
-Download the asset for your platform from the
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/jackmusick/wonderblob/main/Install-Wonderblob.ps1 | iex
+```
+
+Installs the latest release silently, per-user, no admin. Re-run the same command
+to update. Or download the `.msi` / NSIS `*-setup.exe` from
+[Releases](https://github.com/jackmusick/wonderblob/releases) yourself.
+
+> The installer isn't code-signed yet, so SmartScreen will interject —
+> **More info → Run anyway**.
+
+### Linux (one-liner)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jackmusick/wonderblob/main/install.sh | sh
+```
+
+Installs the latest release per-user via Flatpak (real menu integration,
+sandboxed, no sudo). Re-run the same command to update. Requires `flatpak` —
+the script tells you the one-liner to install it if it's missing.
+
+### Manual downloads
+
+Or grab the asset for your platform from the
 [Releases](https://github.com/jackmusick/wonderblob/releases) page:
 
-- **Linux** — `.AppImage` (`chmod +x Wonderblob_*.AppImage && ./Wonderblob_*.AppImage`),
+- **Linux** — `wonderblob.flatpak` (`flatpak install --user wonderblob.flatpak`),
+  the `.AppImage` (`chmod +x Wonderblob_*.AppImage && ./Wonderblob_*.AppImage`),
   or the `.deb` / `.rpm` for your distro.
 - **macOS** — the `.dmg` (arm64 or x86_64). Drag Wonderblob to Applications.
 - **Windows** — the `.msi` or the NSIS `*-setup.exe`.
 
-### Unsigned-build caveats (honest)
+### Unsigned-build caveats
 
 v1 builds are **not code-signed or notarized**. Each OS gates unsigned apps on
 first launch:

@@ -31,7 +31,7 @@ use azure_storage_blob::models::{
     BlobClientDownloadOptions, BlobClientGetPropertiesResultHeaders,
     BlobContainerClientListBlobsOptions, BlockLookupList, HttpRange,
 };
-use azure_storage_blob::{BlobServiceClient, BlockBlobClient};
+use azure_storage_blob::{BlobClient, BlobServiceClient, BlockBlobClient};
 use base64::Engine as _;
 use bytes::BytesMut;
 use futures::StreamExt;
@@ -307,6 +307,27 @@ impl AzBlobBackend {
         }
     }
 
+    /// TEST-ONLY: put an APPEND blob at `path` (a non-block type), so overwrite /
+    /// save-back can be exercised against the type that triggers `InvalidBlobType`.
+    pub async fn put_append_blob_for_test(&self, path: &str, data: &[u8]) -> Result<()> {
+        let p = ObjPath::parse(path);
+        let container = p
+            .container
+            .ok_or_else(|| StorageError::NotFound { path: path.into() })?;
+        let ab = self
+            .service
+            .blob_container_client(&container)
+            .blob_client(&p.key)
+            .append_blob_client();
+        ab.create(None).await.map_err(|e| map_az(path, e))?;
+        if !data.is_empty() {
+            ab.append_block(RequestContent::from(data.to_vec()), data.len() as u64, None)
+                .await
+                .map_err(|e| map_az(path, e))?;
+        }
+        Ok(())
+    }
+
     /// Prefix used to address `key` as a directory: "" => "", "a/b" => "a/b/".
     fn dir_prefix(key: &str) -> String {
         if key.is_empty() {
@@ -397,6 +418,31 @@ impl AzBlobBackend {
 }
 
 /// Heuristic Azure-error mapping (status/code text) into the taxonomy. The
+/// Inner text of the first `<tag>…</tag>` in `s`, trimmed. Used to pull the
+/// `Code`/`Message` out of an Azure XML error body.
+fn xml_tag<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
+    let start = s.find(&format!("<{tag}>"))? + tag.len() + 2;
+    let rest = &s[start..];
+    let end = rest.find(&format!("</{tag}>"))?;
+    Some(rest[..end].trim())
+}
+
+/// Condense an Azure error into a readable one-liner. Azure returns failures as
+/// an XML body — `<Error><Code>X</Code><Message>Y</Message></Error>` — and the
+/// SDK surfaces that raw (including a `RequestId:`/`Time:` trailer on `Message`),
+/// which is what produced the wall-of-XML toast. We keep just `Code: Message`
+/// (Message cut at its first line); with no XML body, the trimmed original.
+fn az_error_summary(raw: &str) -> String {
+    let code = xml_tag(raw, "Code");
+    let msg = xml_tag(raw, "Message").map(|m| m.lines().next().unwrap_or(m).trim());
+    match (code, msg) {
+        (Some(c), Some(m)) => format!("{c}: {m}"),
+        (Some(c), None) => c.to_string(),
+        (None, Some(m)) => m.to_string(),
+        (None, None) => raw.trim().to_string(),
+    }
+}
+
 /// `Debug` form of `azure_core::Error` carries the HTTP status + storage error
 /// code (e.g. `BlobNotFound`), which is enough for the taxonomy's coarse buckets.
 fn map_az(path: &str, e: azure_core::Error) -> StorageError {
@@ -423,7 +469,7 @@ fn map_az(path: &str, e: azure_core::Error) -> StorageError {
         }
     } else {
         StorageError::Other {
-            detail: e.to_string(),
+            detail: az_error_summary(&e.to_string()),
         }
     }
 }
@@ -595,13 +641,18 @@ impl StorageBackend for AzBlobBackend {
                 op: "cannot write a container".into(),
             });
         }
-        let blob = self
+        // Keep the generic BlobClient alongside the block client: if the target
+        // name already holds a non-block blob (append/page), Put Block is rejected
+        // with InvalidBlobType, and the writer recovers by deleting it through the
+        // generic client and recreating as a block blob (see AzBlockWriter).
+        let blob_client = self
             .service
             .blob_container_client(&container)
-            .blob_client(&p.key)
-            .block_blob_client();
+            .blob_client(&p.key);
+        let blob = blob_client.block_blob_client();
         Ok(Box::new(AzBlockWriter {
             blob: Arc::new(blob),
+            blob_client: Arc::new(blob_client),
             buf: BytesMut::with_capacity(PART_SIZE),
             block_index: 0,
             block_ids: Vec::new(),
@@ -785,12 +836,23 @@ fn to_io(e: StorageError) -> io::Error {
     io::Error::other(e.to_string())
 }
 
+/// Does this Azure error carry the `InvalidBlobType` code? Returned (409) when an
+/// operation is wrong for the existing blob's type — here, a `Put Block` against a
+/// name already holding an append or page blob. The code lives in the Debug form
+/// (the XML error body), matched case-insensitively.
+fn is_invalid_blob_type(e: &azure_core::Error) -> bool {
+    format!("{e:?}").to_lowercase().contains("invalidblobtype")
+}
+
 /// Buffers 8 MiB blocks, stages each, and commits the block list on
 /// `poll_shutdown`. `Unpin` because every field is `Unpin` (the in-flight
 /// future is boxed). Uncommitted blocks are garbage-collected by Azure
 /// automatically (~7 days), so an abandoned writer needs no explicit cleanup.
 pub struct AzBlockWriter {
     blob: Arc<BlockBlobClient>,
+    /// Generic client for the same blob, used only to delete-and-recreate when the
+    /// existing blob turns out to be a non-block (append/page) type (see below).
+    blob_client: Arc<BlobClient>,
     buf: BytesMut,
     block_index: u32,
     block_ids: Vec<Vec<u8>>,
@@ -799,19 +861,45 @@ pub struct AzBlockWriter {
 
 impl AzBlockWriter {
     /// Drain the current buffer into a new stage-block future.
+    ///
+    /// Only the FIRST block can meet a pre-existing blob of the wrong type: if the
+    /// name already holds an append or page blob, `Put Block` fails with
+    /// `InvalidBlobType`. Azure has no in-place type conversion, so we delete the
+    /// existing blob and retry the stage — the deleted name then accepts a fresh
+    /// block blob. Subsequent blocks build on that block blob and need no recovery,
+    /// so only the first block clones its body for a possible retry.
     fn start_stage(&mut self) {
         let id = block_id(self.block_index);
+        let recover = self.block_index == 0;
         self.block_index += 1;
         self.block_ids.push(id.clone());
         let body = self.buf.split().to_vec();
         let len = body.len() as u64;
         let blob = self.blob.clone();
-        self.state = WState::Staging(Box::pin(async move {
-            blob.stage_block(&id, len, RequestContent::from(body), None)
-                .await
-                .map_err(|e| map_az("stage_block", e))?;
-            Ok(())
-        }));
+        if recover {
+            let del = self.blob_client.clone();
+            let retry = body.clone();
+            self.state = WState::Staging(Box::pin(async move {
+                match blob.stage_block(&id, len, RequestContent::from(body), None).await {
+                    Ok(_) => Ok(()),
+                    Err(e) if is_invalid_blob_type(&e) => {
+                        del.delete(None).await.map_err(|e| map_az("delete", e))?;
+                        blob.stage_block(&id, len, RequestContent::from(retry), None)
+                            .await
+                            .map_err(|e| map_az("stage_block", e))?;
+                        Ok(())
+                    }
+                    Err(e) => Err(map_az("stage_block", e)),
+                }
+            }));
+        } else {
+            self.state = WState::Staging(Box::pin(async move {
+                blob.stage_block(&id, len, RequestContent::from(body), None)
+                    .await
+                    .map_err(|e| map_az("stage_block", e))?;
+                Ok(())
+            }));
+        }
     }
 
     /// Kick off Put Block List with the staged ids (in stage order).
@@ -918,5 +1006,26 @@ impl AsyncWrite for AzBlockWriter {
                 WState::Done => return Poll::Ready(Ok(())),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::az_error_summary;
+
+    #[test]
+    fn summarizes_azure_xml_error_to_code_and_message() {
+        // The real shape from a failed save: status prefix + XML body, with a
+        // RequestId/Time trailer on the Message line.
+        let raw = "409: <?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>InvalidBlobType</Code><Message>The blob type is invalid for this operation.\nRequestId:a2c31cd8-601e-00f9-38ab-f716d8000000\nTime:2026-06-09T01:01:44.7581809Z</Message></Error>";
+        assert_eq!(
+            az_error_summary(raw),
+            "InvalidBlobType: The blob type is invalid for this operation."
+        );
+    }
+
+    #[test]
+    fn passes_through_plain_text_without_xml() {
+        assert_eq!(az_error_summary("  connection reset  "), "connection reset");
     }
 }

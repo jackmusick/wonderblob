@@ -148,6 +148,10 @@ async fn agent_auth_fails_cleanly_without_agent() {
             "--nocapture",
         ])
         .env("SSH_AUTH_SOCK", "/nonexistent/wonderblob_no_agent.sock")
+        // Isolate from the developer's real ~/.ssh/config: an `IdentityAgent`
+        // there (e.g. 1Password) would otherwise be resolved ahead of the
+        // bogus SSH_AUTH_SOCK and connect successfully, defeating this test.
+        .env("WONDERBLOB_SSH_CONFIG", "/dev/null")
         .output()
         .expect("spawn inner test");
     assert!(

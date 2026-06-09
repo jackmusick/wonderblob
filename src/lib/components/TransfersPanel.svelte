@@ -4,7 +4,8 @@
   import { formatSize } from "$lib/format";
   import { formatSpeed, percent } from "$lib/transfer-format";
   import { activeConnection } from "$lib/stores/session";
-  import { clearCompleted, transferList, transferSpeed } from "$lib/stores/transfers";
+  import { clearCompleted, clearTransfer, transferList, transferSpeed } from "$lib/stores/transfers";
+  import Icon from "./Icon.svelte";
 
   let {
     onerror,
@@ -76,7 +77,9 @@
           bind:this={rowEls[i]}
           onkeydown={(e) => onRowKeydown(e, i)}
         >
-          <span class="dir" aria-hidden="true">{t.direction === "down" ? "▼" : "▲"}</span>
+          <span class="dir" aria-hidden="true" title={t.direction === "down" ? "Download" : "Upload"}>
+            <Icon name={t.direction === "down" ? "download" : "upload"} size={13} />
+          </span>
           <span class="name" title={t.name}>{t.name}</span>
           <div class="bar" class:indeterminate={pct === -1} aria-hidden="true">
             {#if pct >= 0}
@@ -92,7 +95,11 @@
             >
           </span>
           <span class="speed">{formatSpeed($transferSpeed.get(t.id) ?? 0)}</span>
-          <span class="state">{statusLabel(t)}</span>
+          <span
+            class="state"
+            class:done={t.status === "completed"}
+            class:bad={t.status === "failed" || t.status === "canceled"}>{statusLabel(t)}</span
+          >
           <span class="actions">
             {#if t.status === "running"}
               <button class="ghost" onclick={() => pause(t.id)}>Pause</button>
@@ -104,7 +111,16 @@
               <button class="ghost" onclick={() => cancel(t.id)}>Cancel</button>
             {:else if t.status === "failed"}
               <button class="ghost" onclick={() => resume(t.id)}>Retry</button>
-              <button class="ghost" onclick={() => cancel(t.id)}>Cancel</button>
+            {/if}
+            {#if t.status === "completed" || t.status === "canceled" || t.status === "failed"}
+              <button
+                class="icon-dismiss"
+                title="Remove from list"
+                aria-label="Remove {t.name} from list"
+                onclick={() => run(() => clearTransfer(t.id))}
+              >
+                <Icon name="x" size={14} />
+              </button>
             {/if}
           </span>
         </div>
@@ -115,7 +131,7 @@
     </div>
   {/if}
   <div class="footer">
-    <button class="ghost" onclick={() => run(clearCompleted)}>Clear completed</button>
+    <button class="ghost" onclick={() => run(clearCompleted)}>Clear finished</button>
   </div>
 </div>
 
@@ -123,6 +139,10 @@
   .panel {
     display: flex;
     flex-direction: column;
+    /* Fill the flex parent horizontally — without flex:1 the panel shrinks to
+       content width, leaving a gap on the right that doesn't track resize. */
+    flex: 1;
+    min-width: 0;
     height: 100%;
     min-height: 0;
   }
@@ -151,14 +171,18 @@
   }
   .dir {
     flex-shrink: 0;
-    width: 12px;
-    text-align: center;
-    font-size: var(--text-small);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
     color: var(--fg-secondary);
   }
+  /* Name hugs its content (truncating long names); the bar then fills the gap.
+     Two flex-growing columns is what made the layout look "equally spaced". */
   .name {
-    flex: 1 1 0;
-    min-width: 80px;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 42%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -226,6 +250,12 @@
     font-size: var(--text-small);
     color: var(--fg-secondary);
   }
+  .state.done {
+    color: var(--success);
+  }
+  .state.bad {
+    color: var(--danger);
+  }
   .actions {
     flex-shrink: 0;
     display: flex;
@@ -253,6 +283,21 @@
     white-space: nowrap;
   }
   .ghost:hover {
+    background: var(--bg-hover);
+    color: var(--fg-primary);
+  }
+  .icon-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius);
+    color: var(--fg-secondary);
+  }
+  .icon-dismiss:hover {
     background: var(--bg-hover);
     color: var(--fg-primary);
   }
