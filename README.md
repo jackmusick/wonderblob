@@ -14,7 +14,7 @@ Cyberduck is great, but it doesn't run on Linux. Wonderblob aims to be the
 cross-platform equivalent: a single-pane remote file browser that feels like a
 real desktop app — keyboard-first, dense, quiet — not a web page in a frame.
 
-## Features (today)
+## Features
 
 - **SFTP** browsing, upload/download, rename, delete, new folder
 - **SSH agent authentication** — works out of the box with 1Password,
@@ -66,7 +66,7 @@ Or grab the asset for your platform from the
 - **macOS** — the `.dmg` (arm64 or x86_64). Drag Wonderblob to Applications.
 - **Windows** — the `.msi` or the NSIS `*-setup.exe`.
 
-### Unsigned-build caveats (honest)
+### Unsigned-build caveats
 
 v1 builds are **not code-signed or notarized**. Each OS gates unsigned apps on
 first launch:
