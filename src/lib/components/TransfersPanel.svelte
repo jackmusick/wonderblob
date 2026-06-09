@@ -174,7 +174,7 @@
     color: var(--fg-secondary);
   }
   .name {
-    flex: 1 1 0;
+    flex: 2 1 0;
     min-width: 80px;
     overflow: hidden;
     text-overflow: ellipsis;
