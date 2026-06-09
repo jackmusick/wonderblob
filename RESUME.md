@@ -95,3 +95,35 @@ unverified end-to-end — it needs a published release to test:
    manifest desktop file, route the editor spawn through OpenURI.
 3. **Windows:** `irm … | iex` on a real Windows box; confirm per-user silent
    install and that re-running updates in place.
+
+## UX overhaul + SSH fix (2026-06-08, later session)
+
+Big batch of UX work landed on `release-prep-v0.1.0` (commits `b7b54cc`→`f90b026`).
+All committed; installed RPM is current.
+
+**SSH Agent auth — fixed.** Root cause: agent auth used russh `connect_env()`
+(reads only `$SSH_AUTH_SOCK`), but the user's key lives in 1Password selected via
+`ssh_config` `IdentityAgent`. New `crates/wonderblob-core/src/ssh_agent.rs`
+resolves the socket like `ssh` does (IdentityAgent wins over env). Tests use
+`WONDERBLOB_SSH_CONFIG=/dev/null` to isolate. `errors.ts` now surfaces the auth
+detail instead of a bare "Authentication failed."
+
+**UX:** new `Icon.svelte` (inline-SVG set) + `ContextMenu.svelte`; file-type
+icons + right-click menus (files & connections); connection protocol icons +
+green connected-dot + single-click connect/disconnect toggle; icon toolbar
+(Download icon → ~/Downloads, right-click → Download As); sortable + resizable +
+show/hide file columns; tree view (expandable folders, lazy children);
+resizable sidebar; transfers direction icons + "Clear finished" + per-row ×
+force-remove (`clear_transfer` command) + fills width; `Settings.svelte`
+(theme system/light/dark via `data-theme`, confirm-delete, column visibility),
+backed by `src/lib/stores/prefs.ts`. Plan: `docs/superpowers/plans/2026-06-08-ux-pass.md`.
+
+**Still open:** search (deferred); green-dot/single-click-connect kept as-is
+(toggleable); transfers could get a floating-popover variant (currently a docked
+panel toggled by the toolbar icon).
+
+**⚠️ Dev caveat:** `npm run tauri dev` HMR is UNRELIABLE here — the webview
+paints before Vite is ready and patches CSS inconsistently, so the dev window
+misrenders (looked like broken layout when the source was fine). **Verify against
+release builds** (`npm run tauri build --bundles rpm` + `sudo dnf reinstall`), not
+the dev window. A clean fix for the dev race is a future task.
