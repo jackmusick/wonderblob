@@ -236,23 +236,44 @@ async fn authenticate_agent(
     host: &str,
 ) -> Result<bool> {
     use russh_keys::agent::client::AgentClient;
+    // Connect to the platform's ssh-agent. The Unix and Windows clients use
+    // different stream types, so each arm calls `.dynamic()` to erase the type —
+    // both yield the same `AgentClient` for the identity loop below.
+    #[cfg(unix)]
     let mut agent = match crate::ssh_agent::resolve_agent_socket(host) {
         // ssh_config's IdentityAgent wins over the environment, just like ssh.
-        Some(path) => {
-            AgentClient::connect_uds(&path)
-                .await
-                .map_err(|e| StorageError::AuthFailed {
-                    detail: format!(
-                        "cannot reach ssh-agent at {} (from ssh_config IdentityAgent): {e}",
-                        path.display()
-                    ),
-                })?
-        }
+        Some(path) => AgentClient::connect_uds(&path)
+            .await
+            .map_err(|e| StorageError::AuthFailed {
+                detail: format!(
+                    "cannot reach ssh-agent at {} (from ssh_config IdentityAgent): {e}",
+                    path.display()
+                ),
+            })?
+            .dynamic(),
         None => AgentClient::connect_env()
             .await
             .map_err(|e| StorageError::AuthFailed {
                 detail: format!("cannot reach ssh-agent (is SSH_AUTH_SOCK set?): {e}"),
-            })?,
+            })?
+            .dynamic(),
+    };
+
+    #[cfg(windows)]
+    let mut agent = {
+        // Windows ssh-agents speak over a named pipe. OpenSSH's agent and the
+        // 1Password agent both expose the standard pipe; honor an explicit
+        // IdentityAgent pipe path from ssh_config when one is set.
+        const DEFAULT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+        let pipe = crate::ssh_agent::resolve_agent_socket(host)
+            .map(|p| p.into_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from(DEFAULT_PIPE));
+        AgentClient::connect_named_pipe(&pipe)
+            .await
+            .map_err(|e| StorageError::AuthFailed {
+                detail: format!("cannot reach ssh-agent at {}: {e}", pipe.to_string_lossy()),
+            })?
+            .dynamic()
     };
     let identities = agent
         .request_identities()

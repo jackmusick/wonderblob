@@ -20,7 +20,10 @@ use std::path::{Path, PathBuf};
 /// `None` means "no `IdentityAgent` applies — fall back to `$SSH_AUTH_SOCK`"
 /// (russh's `connect_env`).
 pub fn resolve_agent_socket(host: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    // HOME on Unix; USERPROFILE on Windows (where HOME is usually unset).
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
     let config_path = std::env::var_os("WONDERBLOB_SSH_CONFIG")
         .map(PathBuf::from)
         .or_else(|| home.as_ref().map(|h| h.join(".ssh/config")))?;
