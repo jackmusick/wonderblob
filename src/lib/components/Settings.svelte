@@ -99,10 +99,10 @@
     width: 360px;
     max-height: 85vh;
     overflow-y: auto;
-    background: var(--bg-content);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.45);
     padding: 16px;
     display: flex;
     flex-direction: column;
@@ -125,7 +125,7 @@
     display: flex;
     gap: 2px;
     padding: 2px;
-    background: var(--bg-app);
+    background: var(--bg-field);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     width: fit-content;
@@ -143,10 +143,11 @@
   .seg-btn:hover {
     color: var(--fg-primary);
   }
+  /* Active segment = accent fill (vivid, 1Password/macOS-style) so it pops
+     off the inset track on the dark panel. */
   .seg-btn.active {
-    background: var(--bg-content);
-    color: var(--fg-primary);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+    background: var(--accent);
+    color: #fff;
   }
   .checkrow {
     display: flex;

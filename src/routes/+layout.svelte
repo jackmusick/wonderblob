@@ -18,9 +18,11 @@
         e.preventDefault();
       }
     };
-    if (!import.meta.env.DEV) {
-      window.addEventListener("contextmenu", onContextMenu);
-    }
+    // Suppress the native webview menu (Reload / View Source / Inspect) app-wide
+    // for native-app immersion. Components with their own right-click menus call
+    // preventDefault locally, so this only blocks the default where nothing else
+    // handled it. Applies in dev too — use F12 / Ctrl+Shift+I to open devtools.
+    window.addEventListener("contextmenu", onContextMenu);
     window.addEventListener("keydown", onKeydown);
     return () => {
       window.removeEventListener("contextmenu", onContextMenu);

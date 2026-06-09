@@ -70,10 +70,10 @@
     position: relative;
     width: 400px;
     max-width: 90vw;
-    background: var(--bg-content);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.45);
     padding: 16px;
     display: flex;
     flex-direction: column;

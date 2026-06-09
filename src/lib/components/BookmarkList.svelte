@@ -46,6 +46,23 @@
     }
   }
 
+  // Real brand colors for the protocol glyphs — the vibrant spot of colour in
+  // the (otherwise near-black) sidebar. Tuned a touch brighter than the official
+  // hexes so they sing against the dark plane. Deliberately none of them green:
+  // green is reserved as the "connected" status cue and overrides these.
+  function brandColor(p: Bookmark["protocol"]): string {
+    switch (p) {
+      case "sftp":
+        return "#e0a24e"; // Tux amber
+      case "s3":
+        return "#ff9a2e"; // AWS orange
+      case "azBlob":
+        return "#3a9bef"; // Azure blue
+      case "oneDrive":
+        return "#4aa8ee"; // OneDrive blue
+    }
+  }
+
   /** Tear down the active connection (mirrors the old toolbar Disconnect). */
   function disconnectActive() {
     const active = $activeConnection;
@@ -246,7 +263,12 @@
         oncontextmenu={(e) => openRowMenu(e, i, b)}
         onkeydown={() => {}}
       >
-        <span class="proto" class:connected={selected} aria-hidden="true">
+        <span
+          class="proto"
+          class:connected={selected}
+          style={selected ? undefined : `color:${brandColor(b.protocol)}`}
+          aria-hidden="true"
+        >
           <Icon name={protoIcon(b.protocol)} size={16} />
         </span>
         <span class="label" title={rowTitle(b)}>{b.label}</span>
@@ -348,8 +370,15 @@
   .row:hover {
     background: var(--bg-hover);
   }
+  /* Selected = the live connection. A vibrant rounded pill with an accent bar
+     down the leading edge (1Password-style), so the active server is obvious
+     even against the dark sidebar. */
   .row.selected {
     background: var(--bg-selected);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .row.selected .label {
+    font-weight: 600;
   }
   .list:focus .row.focused {
     outline: 1px solid var(--accent);
@@ -361,9 +390,10 @@
     align-items: center;
     color: var(--fg-secondary);
   }
-  /* Connected = the protocol icon turns green (the single status cue; no dot). */
+  /* Connected = the protocol icon turns green (the single status cue; no dot).
+     Wins over the per-brand colour set inline on the disconnected glyph. */
   .proto.connected {
-    color: #3fb950;
+    color: var(--success);
   }
   .label {
     flex: 1;
@@ -371,6 +401,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: var(--text-base);
+    font-weight: var(--weight-label);
     color: var(--fg-primary);
   }
   .hint {

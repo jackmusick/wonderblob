@@ -38,6 +38,7 @@
     search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
     x: '<path d="M6 6l12 12M18 6 6 18"/>',
     check: '<path d="M5 12l5 5 9-11"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11.5v5"/><circle cx="12" cy="7.8" r="0.7" fill="currentColor" stroke="none"/>',
     dot: '<circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/>',
     "chevron-right": '<path d="M9 6l6 6-6 6"/>',
     "chevron-down": '<path d="M6 9l6 6 6-6"/>',

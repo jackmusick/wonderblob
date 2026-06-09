@@ -110,11 +110,15 @@
     position: fixed;
     z-index: 1001;
     min-width: 184px;
-    padding: 4px;
-    background: var(--bg-content);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+    padding: 5px;
+    /* Elevated surface — a notch above the content plane, with a brighter
+       hairline and a deeper shadow so the menu reads as floating. */
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    box-shadow:
+      0 12px 34px rgba(0, 0, 0, 0.45),
+      0 1px 0 rgba(255, 255, 255, 0.04) inset;
     display: flex;
     flex-direction: column;
     gap: 1px;
@@ -127,21 +131,27 @@
     padding: 0 8px;
     background: transparent;
     border: none;
-    border-radius: 4px;
+    border-radius: 5px;
     color: var(--fg-primary);
     font-family: var(--font-ui);
     font-size: var(--text-base);
+    font-weight: var(--weight-label);
     text-align: left;
     cursor: default;
   }
+  /* Accent-tinted hover (1Password-style) instead of a flat gray wash. */
   .item:hover:not(:disabled) {
-    background: var(--bg-hover);
+    background: var(--bg-selected);
+    color: var(--fg-primary);
   }
   .item:disabled {
     opacity: 0.4;
   }
   .item.danger {
     color: var(--danger);
+  }
+  .item.danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
   }
   .label {
     flex: 1;
@@ -151,9 +161,10 @@
     height: 15px;
     flex: none;
   }
+  /* Full-bleed divider with a brighter line than the body hairlines. */
   .sep {
     height: 1px;
-    margin: 3px 6px;
-    background: var(--border);
+    margin: 4px -5px;
+    background: var(--border-strong);
   }
 </style>

@@ -95,7 +95,11 @@
             >
           </span>
           <span class="speed">{formatSpeed($transferSpeed.get(t.id) ?? 0)}</span>
-          <span class="state">{statusLabel(t)}</span>
+          <span
+            class="state"
+            class:done={t.status === "completed"}
+            class:bad={t.status === "failed" || t.status === "canceled"}>{statusLabel(t)}</span
+          >
           <span class="actions">
             {#if t.status === "running"}
               <button class="ghost" onclick={() => pause(t.id)}>Pause</button>
@@ -245,6 +249,12 @@
     text-align: right;
     font-size: var(--text-small);
     color: var(--fg-secondary);
+  }
+  .state.done {
+    color: var(--success);
+  }
+  .state.bad {
+    color: var(--danger);
   }
   .actions {
     flex-shrink: 0;

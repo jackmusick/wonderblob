@@ -8,6 +8,7 @@
   import { prefs } from "../stores/prefs";
   import Icon from "./Icon.svelte";
   import ContextMenu, { type MenuItem } from "./ContextMenu.svelte";
+  import InfoDialog from "./InfoDialog.svelte";
 
   let {
     onerror,
@@ -33,6 +34,8 @@
 
   // Right-click menu (row actions, or empty-area New Folder / Upload).
   let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  // Non-null while the read-only "Info" dialog is open for an entry.
+  let infoEntry = $state<Entry | null>(null);
 
   const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "heic", "avif", "tiff"]);
   const CODE_EXT = new Set(["js", "ts", "jsx", "tsx", "rs", "py", "go", "rb", "java", "kt", "c", "cc", "cpp", "h", "hpp", "cs", "php", "swift", "sh", "bash", "zsh", "html", "css", "scss", "json", "yaml", "yml", "toml", "xml", "sql", "lua", "vue", "svelte"]);
@@ -66,6 +69,8 @@
       { separator: true },
       { label: "Rename", icon: "pencil", action: () => startRename(entry) },
       { label: "Delete", icon: "trash", danger: true, action: () => doDelete(entry) },
+      { separator: true },
+      { label: "Info", icon: "info", action: () => (infoEntry = entry) },
     );
     return items;
   }
@@ -617,6 +622,10 @@
   <ContextMenu x={menu.x} y={menu.y} items={menu.items} onclose={() => (menu = null)} />
 {/if}
 
+{#if infoEntry}
+  <InfoDialog entry={infoEntry} onclose={() => (infoEntry = null)} />
+{/if}
+
 <style>
   .filelist {
     display: flex;
@@ -678,6 +687,7 @@
   }
   .row.selected {
     background: var(--bg-selected);
+    box-shadow: inset 2px 0 0 var(--accent);
   }
   .col-name {
     flex: 1;
@@ -711,6 +721,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-weight: var(--weight-label);
   }
   .glyph {
     flex-shrink: 0;
