@@ -113,7 +113,7 @@
   // Start the edit store once (reconcile + subscribe to edit:// events).
   $effect(() => {
     initEdit({
-      onSaved: (name) => showToast(`Saved “${name}”`),
+      onSaved: (name) => showToast(`Saved “${name}”`, "info"),
       onError: showToast,
     });
   });
@@ -130,6 +130,7 @@
   });
 
   let toast = $state<string | null>(null);
+  let toastKind = $state<"error" | "info">("error");
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
   let copied = $state<string | null>(null);
@@ -152,8 +153,12 @@
     await list?.reload();
   }
 
-  function showToast(message: string) {
+  // Default kind is "error" (red) — most callers are failures. Successes and
+  // gentle prompts pass "info" so a "Saved"/"Downloading" message doesn't read
+  // as a failure.
+  function showToast(message: string, kind: "error" | "info" = "error") {
     toast = message;
+    toastKind = kind;
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => (toast = null), 5000);
   }
@@ -225,7 +230,7 @@
     if (!conn) return;
     const entry = fileList?.selected() ?? null;
     if (!entry || entry.kind === "dir") {
-      showToast("Select a file to share.");
+      showToast("Select a file to share.", "info");
       return;
     }
     try {
@@ -244,7 +249,7 @@
     if (!conn) return;
     const entry = fileList?.selected() ?? null;
     if (!entry || entry.kind === "dir") {
-      showToast("Select a file to download.");
+      showToast("Select a file to download.", "info");
       return;
     }
     const dest = await save({ defaultPath: entry.name, title: "Download to…" });
@@ -264,13 +269,13 @@
     if (!conn) return;
     const entry = fileList?.selected() ?? null;
     if (!entry || entry.kind === "dir") {
-      showToast("Select a file to download.");
+      showToast("Select a file to download.", "info");
       return;
     }
     try {
       await api.enqueueDownloadToDownloads(conn.id, entry.path, entry.size ?? undefined);
       transfersOpen = true; // reveal progress
-      showToast(`Downloading “${entry.name}” to Downloads`);
+      showToast(`Downloading “${entry.name}” to Downloads`, "info");
     } catch (e) {
       showToast(opError(e, "Couldn't start download"));
     }
@@ -388,7 +393,13 @@
         </div>
       {/if}
       {#if toast}
-        <div class="toast" role="alert">{toast}</div>
+        <div
+          class="toast"
+          class:info={toastKind === "info"}
+          role={toastKind === "info" ? "status" : "alert"}
+        >
+          {toast}
+        </div>
       {/if}
       {#if copied}
         <div class="copied" role="status">{copied}</div>
@@ -546,6 +557,11 @@
     color: var(--danger);
     border-top: 1px solid var(--border);
     background: var(--bg-content);
+  }
+  /* Info/success — neutral, not the red that reads as a failure. */
+  .toast.info {
+    color: var(--fg-primary);
+    background: var(--bg-selected);
   }
   .copied {
     flex-shrink: 0;

@@ -173,9 +173,12 @@
     width: 14px;
     color: var(--fg-secondary);
   }
+  /* Name hugs its content (truncating long names); the bar then fills the gap.
+     Two flex-growing columns is what made the layout look "equally spaced". */
   .name {
-    flex: 2 1 0;
-    min-width: 80px;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 42%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
