@@ -253,7 +253,6 @@
         {#if connectingId === b.id}
           <span class="hint">connecting…</span>
         {:else}
-          {#if selected}<span class="dot" title="Connected" aria-label="Connected"></span>{/if}
           <span class="row-actions">
             {#if selected}
               <button
@@ -362,8 +361,9 @@
     align-items: center;
     color: var(--fg-secondary);
   }
+  /* Connected = the protocol icon turns green (the single status cue; no dot). */
   .proto.connected {
-    color: var(--accent);
+    color: #3fb950;
   }
   .label {
     flex: 1;
@@ -376,18 +376,6 @@
   .hint {
     font-size: var(--text-small);
     color: var(--fg-secondary);
-  }
-  /* Green presence dot on the live connection; hidden while hover actions show. */
-  .dot {
-    flex-shrink: 0;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #3fb950;
-  }
-  .row:hover .dot,
-  .row:focus-within .dot {
-    display: none;
   }
   /* Hidden until hover or keyboard focus lands inside the row, but the
      buttons stay rendered so they remain in the tab order. */

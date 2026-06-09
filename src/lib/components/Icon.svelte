@@ -19,13 +19,7 @@
       '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M10.5 7v1.5M10.5 10.5v1.5M10.5 14v1.5"/>',
     "file-pdf":
       '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><text x="7.2" y="18.5" font-size="5.5" fill="currentColor" stroke="none" font-weight="600">PDF</text>',
-    // protocols (distinct silhouettes)
-    sftp: '<rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><circle cx="7.5" cy="7.5" r=".7" fill="currentColor" stroke="none"/><circle cx="7.5" cy="16.5" r=".7" fill="currentColor" stroke="none"/>',
-    s3: '<ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v6c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6"/><path d="M5 12v6c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-6"/>',
-    azure:
-      '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12 4 7.5M12 12v9M12 12l8-4.5"/>',
-    onedrive:
-      '<path d="M7.5 18a4 4 0 0 1-.3-8A5 5 0 0 1 17 8.5 3.5 3.5 0 0 1 17.5 18z"/>',
+    // (protocol icons — sftp/s3/azure/onedrive — come from brand-icons.ts)
     // actions
     download: '<path d="M12 3v12"/><path d="M7 11l5 4 5-4"/><path d="M5 20h14"/>',
     upload: '<path d="M12 21V9"/><path d="M7 13l5-4 5 4"/><path d="M5 4h14"/>',
@@ -52,25 +46,45 @@
 </script>
 
 <script lang="ts">
+  import { BRAND_ICONS } from "./brand-icons";
+
   let { name, size = 16 }: { name: keyof typeof ICONS | string; size?: number } =
     $props();
+
+  // Brand glyphs (Simple Icons) are solid fills; the rest of the set is stroked.
+  const brand = $derived(BRAND_ICONS[name]);
 </script>
 
-<svg
-  class="icon"
-  width={size}
-  height={size}
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="2"
-  stroke-linecap="round"
-  stroke-linejoin="round"
-  aria-hidden="true"
->
-  <!-- eslint-disable-next-line svelte/no-at-html-tags -- static, trusted icon table -->
-  {@html ICONS[name] ?? ICONS.file}
-</svg>
+{#if brand}
+  <svg
+    class="icon"
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    stroke="none"
+    aria-hidden="true"
+  >
+    <!-- eslint-disable-next-line svelte/no-at-html-tags -- static, trusted icon table -->
+    {@html brand}
+  </svg>
+{:else}
+  <svg
+    class="icon"
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <!-- eslint-disable-next-line svelte/no-at-html-tags -- static, trusted icon table -->
+    {@html ICONS[name] ?? ICONS.file}
+  </svg>
+{/if}
 
 <style>
   .icon {
