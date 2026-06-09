@@ -13,7 +13,7 @@
 # (bump if the app fails to launch from the built bundle).
 app-id: com.wonderblob.app
 runtime: org.gnome.Platform
-runtime-version: '47'
+runtime-version: '49'
 sdk: org.gnome.Sdk
 command: wonderblob
 
