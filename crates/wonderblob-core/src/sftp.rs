@@ -236,31 +236,32 @@ async fn authenticate_agent(
     host: &str,
 ) -> Result<bool> {
     use russh_keys::agent::client::AgentClient;
-    // Connect to the platform's ssh-agent. The Unix and Windows clients use
-    // different stream types, so each arm calls `.dynamic()` to erase the type —
-    // both yield the same `AgentClient` for the identity loop below.
+    // Connect to the platform's ssh-agent, then run the shared identity loop.
+    // Unix and Windows use different concrete stream types; keeping them concrete
+    // (instead of boxing via `.dynamic()`) preserves `Send` for the async future
+    // the Tauri command layer wraps this in.
     #[cfg(unix)]
-    let mut agent = match crate::ssh_agent::resolve_agent_socket(host) {
+    let agent = match crate::ssh_agent::resolve_agent_socket(host) {
         // ssh_config's IdentityAgent wins over the environment, just like ssh.
-        Some(path) => AgentClient::connect_uds(&path)
-            .await
-            .map_err(|e| StorageError::AuthFailed {
-                detail: format!(
-                    "cannot reach ssh-agent at {} (from ssh_config IdentityAgent): {e}",
-                    path.display()
-                ),
-            })?
-            .dynamic(),
+        Some(path) => {
+            AgentClient::connect_uds(&path)
+                .await
+                .map_err(|e| StorageError::AuthFailed {
+                    detail: format!(
+                        "cannot reach ssh-agent at {} (from ssh_config IdentityAgent): {e}",
+                        path.display()
+                    ),
+                })?
+        }
         None => AgentClient::connect_env()
             .await
             .map_err(|e| StorageError::AuthFailed {
                 detail: format!("cannot reach ssh-agent (is SSH_AUTH_SOCK set?): {e}"),
-            })?
-            .dynamic(),
+            })?,
     };
 
     #[cfg(windows)]
-    let mut agent = {
+    let agent = {
         // Windows ssh-agents speak over a named pipe. OpenSSH's agent and the
         // 1Password agent both expose the standard pipe; honor an explicit
         // IdentityAgent pipe path from ssh_config when one is set.
@@ -273,8 +274,23 @@ async fn authenticate_agent(
             .map_err(|e| StorageError::AuthFailed {
                 detail: format!("cannot reach ssh-agent at {}: {e}", pipe.to_string_lossy()),
             })?
-            .dynamic()
     };
+
+    agent_auth_loop(session, user, agent).await
+}
+
+/// Try every identity the agent offers; the first one the server accepts wins.
+/// Generic over the agent's stream type so each platform passes its concrete
+/// client (Unix-domain socket / Windows named pipe) without type erasure —
+/// keeping the future `Send`.
+async fn agent_auth_loop<S>(
+    session: &mut client::Handle<Handler>,
+    user: &str,
+    mut agent: russh_keys::agent::client::AgentClient<S>,
+) -> Result<bool>
+where
+    S: russh_keys::agent::client::AgentStream + Send + Unpin + 'static,
+{
     let identities = agent
         .request_identities()
         .await
