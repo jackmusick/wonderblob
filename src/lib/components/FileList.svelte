@@ -5,6 +5,7 @@
   import { formatMtime, formatSize } from "../format";
   import { activeConnection, currentPath } from "../stores/session";
   import { editPaths } from "../stores/edit";
+  import { prefs } from "../stores/prefs";
   import Icon from "./Icon.svelte";
   import ContextMenu, { type MenuItem } from "./ContextMenu.svelte";
 
@@ -88,6 +89,42 @@
         { label: "Upload…", icon: "upload", action: () => onUpload?.() },
       ],
     };
+  }
+
+  // Right-click the column header → toggle which optional columns are shown.
+  function toggleCol(key: "size" | "modified") {
+    prefs.update((p) => ({ ...p, columns: { ...p.columns, [key]: !p.columns[key] } }));
+  }
+  function openHeaderMenu(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    menu = {
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        { label: "Size", icon: $prefs.columns.size ? "check" : undefined, action: () => toggleCol("size") },
+        { label: "Modified", icon: $prefs.columns.modified ? "check" : undefined, action: () => toggleCol("modified") },
+      ],
+    };
+  }
+
+  // Drag a column's left divider to resize it; the flexible Name column absorbs
+  // the slack. Persisted via the prefs store.
+  function startColResize(e: PointerEvent, key: "size" | "modified") {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = $prefs.colWidths[key];
+    const onMove = (ev: PointerEvent) => {
+      const w = Math.min(400, Math.max(50, startW - (ev.clientX - startX)));
+      prefs.update((p) => ({ ...p, colWidths: { ...p.colWidths, [key]: w } }));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   }
 
   // Transient "Opening…" hint while an EditSession download is in flight.
@@ -331,6 +368,10 @@
   }
 
   function requestDelete(entry: Entry) {
+    if (!$prefs.confirmDelete) {
+      doDelete(entry);
+      return;
+    }
     if (confirmingDeletePath === entry.path) {
       cancelConfirm();
       doDelete(entry);
@@ -448,20 +489,44 @@
   onkeydown={onkeydown}
   oncontextmenu={openEmptyMenu}
 >
-  <div class="header" role="presentation">
+  <div class="header" role="presentation" oncontextmenu={openHeaderMenu}>
     <button class="col-name sort-btn" onclick={() => setSort("name")}>
       Name
       {#if sortCol === "name"}<span class="arr">{sortDir === 1 ? "▲" : "▼"}</span>{/if}
       {#if opening}<span class="opening">· Opening…</span>{/if}
     </button>
-    <button class="col-size sort-btn" onclick={() => setSort("size")}>
-      {#if sortCol === "size"}<span class="arr">{sortDir === 1 ? "▲" : "▼"}</span>{/if}
-      Size
-    </button>
-    <button class="col-mtime sort-btn" onclick={() => setSort("mtime")}>
-      {#if sortCol === "mtime"}<span class="arr">{sortDir === 1 ? "▲" : "▼"}</span>{/if}
-      Modified
-    </button>
+    {#if $prefs.columns.size}
+      <div
+        class="resize-handle"
+        role="separator"
+        aria-label="Resize Size column"
+        onpointerdown={(e) => startColResize(e, "size")}
+      ></div>
+      <button
+        class="col-size sort-btn"
+        style="width:{$prefs.colWidths.size}px"
+        onclick={() => setSort("size")}
+      >
+        {#if sortCol === "size"}<span class="arr">{sortDir === 1 ? "▲" : "▼"}</span>{/if}
+        Size
+      </button>
+    {/if}
+    {#if $prefs.columns.modified}
+      <div
+        class="resize-handle"
+        role="separator"
+        aria-label="Resize Modified column"
+        onpointerdown={(e) => startColResize(e, "modified")}
+      ></div>
+      <button
+        class="col-mtime sort-btn"
+        style="width:{$prefs.colWidths.modified}px"
+        onclick={() => setSort("mtime")}
+      >
+        {#if sortCol === "mtime"}<span class="arr">{sortDir === 1 ? "▲" : "▼"}</span>{/if}
+        Modified
+      </button>
+    {/if}
   </div>
 
   {#if showSpinner}
@@ -533,8 +598,16 @@
             <span class="confirm">Delete? Press again to confirm</span>
           {/if}
         </span>
-        <span class="col-size">{formatSize(entry.size)}</span>
-        <span class="col-mtime">{formatMtime(entry.modifiedMs)}</span>
+        {#if $prefs.columns.size}
+          <span class="col-gap" aria-hidden="true"></span>
+          <span class="col-size" style="width:{$prefs.colWidths.size}px">{formatSize(entry.size)}</span>
+        {/if}
+        {#if $prefs.columns.modified}
+          <span class="col-gap" aria-hidden="true"></span>
+          <span class="col-mtime" style="width:{$prefs.colWidths.modified}px"
+            >{formatMtime(entry.modifiedMs)}</span
+          >
+        {/if}
       </div>
     {/each}
   {/if}
@@ -663,6 +736,21 @@
     font-size: var(--text-small);
     color: var(--fg-secondary);
     flex-shrink: 0;
+  }
+  /* Draggable divider in the header; the rows use an inert .col-gap of the same
+     width so header and row columns stay pixel-aligned. */
+  .resize-handle {
+    flex-shrink: 0;
+    width: 6px;
+    align-self: stretch;
+    cursor: col-resize;
+  }
+  .resize-handle:hover {
+    background: var(--border);
+  }
+  .col-gap {
+    flex-shrink: 0;
+    width: 6px;
   }
   .rename-input {
     flex: 1;
