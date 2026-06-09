@@ -27,6 +27,18 @@ finish-args:
   # OneDrive sign-in opens the browser; opening a file in the user's editor
   # (EditSession) also rides OpenURI.
   - --talk-name=org.freedesktop.portal.OpenURI
+  # Saved connection secrets go to the host keyring via the Secret Service
+  # (gnome-keyring / KDE ksecretd). Without this the sandbox filters the name
+  # out and every keyring call fails with org.freedesktop.DBus.Error.ServiceUnknown.
+  - --talk-name=org.freedesktop.secrets
+  # SFTP agent auth. --socket=ssh-auth covers any agent reached via the standard
+  # $SSH_AUTH_SOCK (default agent, gpg-agent, gnome-keyring, systemd, yubikey).
+  # Password-manager agents are instead selected via IdentityAgent in ssh_config
+  # at fixed vendor paths the sandbox can't see — pre-grant the common ones so
+  # they work out of the box. Anything else: see README for a one-time override.
+  - --socket=ssh-auth
+  - --filesystem=~/.1password/agent.sock         # 1Password
+  - --filesystem=~/.bitwarden-ssh-agent.sock     # Bitwarden
   # "To Downloads" writes ~/Downloads directly (no save dialog). Regular
   # open/save dialogs go through the file-chooser portal — no broad fs grant.
   - --filesystem=xdg-download

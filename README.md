@@ -55,14 +55,33 @@ Installs the latest release per-user via Flatpak (real menu integration,
 sandboxed, no sudo). Re-run the same command to update. Requires `flatpak` —
 the script tells you the one-liner to install it if it's missing.
 
-### Manual downloads
+Because the Flatpak is sandboxed, host access is granted explicitly. Saved-secret
+storage (Secret Service) works out of the box, as does SSH agent auth for the
+standard `$SSH_AUTH_SOCK` agent (default agent, gpg-agent, gnome-keyring,
+systemd, yubikey) and the **1Password** and **Bitwarden** agents. If your keys
+live in a different agent referenced by `IdentityAgent` (e.g. a custom path),
+the sandbox can't see that socket — grant it once:
 
-Or grab the asset for your platform from the
+```sh
+flatpak override --user --filesystem=/path/to/your/agent.sock com.wonderblob.app
+```
+
+### Native packages (no sandbox)
+
+Prefer an unsandboxed install — so keyring and *any* SSH agent work with no
+grants at all — or not using Flatpak? Grab a package from the
 [Releases](https://github.com/jackmusick/wonderblob/releases) page:
 
-- **Linux** — `wonderblob.flatpak` (`flatpak install --user wonderblob.flatpak`),
-  the `.AppImage` (`chmod +x Wonderblob_*.AppImage && ./Wonderblob_*.AppImage`),
-  or the `.deb` / `.rpm` for your distro.
+- **Fedora / RHEL / openSUSE** — `.rpm` (`sudo dnf install ./Wonderblob_*.rpm`)
+- **Debian / Ubuntu** — `.deb` (`sudo apt install ./Wonderblob_*.deb`)
+- **Any distro** — the `.AppImage`
+  (`chmod +x Wonderblob_*.AppImage && ./Wonderblob_*.AppImage`)
+
+### Manual downloads (other platforms)
+
+Grab the asset from the
+[Releases](https://github.com/jackmusick/wonderblob/releases) page:
+
 - **macOS** — the `.dmg` (arm64 or x86_64). Drag Wonderblob to Applications.
 - **Windows** — the `.msi` or the NSIS `*-setup.exe`.
 
