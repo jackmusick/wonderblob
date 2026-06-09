@@ -39,6 +39,12 @@ finish-args:
   - --socket=ssh-auth
   - --filesystem=~/.1password/agent.sock         # 1Password
   - --filesystem=~/.bitwarden-ssh-agent.sock     # Bitwarden
+  # Read ssh_config to honor IdentityAgent (points agent auth at the right
+  # socket, e.g. 1Password) and to read key files for KeyFile auth. Read-only:
+  # host keys use the app's own known_hosts store, not ~/.ssh. Without this the
+  # sandbox can't see the config, agent auth falls back to the empty default
+  # $SSH_AUTH_SOCK agent, and SFTP fails with "Authentication failed".
+  - --filesystem=~/.ssh:ro
   # "To Downloads" writes ~/Downloads directly (no save dialog). Regular
   # open/save dialogs go through the file-chooser portal — no broad fs grant.
   - --filesystem=xdg-download
