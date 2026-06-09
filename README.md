@@ -32,7 +32,20 @@ real desktop app — keyboard-first, dense, quiet — not a web page in a frame.
 
 ## Install
 
-### Linux (Flatpak)
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/jackmusick/wonderblob/main/Install-Wonderblob.ps1 | iex
+```
+
+Installs the latest release silently, per-user, no admin. Re-run the same command
+to update. Or download the `.msi` / NSIS `*-setup.exe` from
+[Releases](https://github.com/jackmusick/wonderblob/releases) yourself.
+
+> The installer isn't code-signed yet, so SmartScreen will interject —
+> **More info → Run anyway**.
+
+### Linux (one-liner)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jackmusick/wonderblob/main/install.sh | sh
@@ -41,16 +54,6 @@ curl -fsSL https://raw.githubusercontent.com/jackmusick/wonderblob/main/install.
 Installs the latest release per-user via Flatpak (real menu integration,
 sandboxed, no sudo). Re-run the same command to update. Requires `flatpak` —
 the script tells you the one-liner to install it if it's missing.
-
-### Windows
-
-```powershell
-irm https://raw.githubusercontent.com/jackmusick/wonderblob/main/Install-Wonderblob.ps1 | iex
-```
-
-Downloads the latest NSIS installer and runs it silently, per-user, no admin.
-Re-run to update. The installer isn't code-signed yet, so SmartScreen will
-interject — see the caveats below.
 
 ### Manual downloads
 
