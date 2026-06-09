@@ -2,6 +2,27 @@
 
 All notable changes to Wonderblob are documented here. Versions are pre-1.0 (0.x).
 
+## 0.1.1
+
+Linux Flatpak fixes. The 0.1.0 Flatpak ran sandboxed without the host access it
+needed, so secrets and SFTP agent auth failed (both worked in unsandboxed
+dev/native builds). Native `.deb`/`.rpm`/AppImage installs were unaffected.
+
+### Fixed
+
+- **Saved-connection secrets** now work in the Flatpak — granted the Secret
+  Service D-Bus name (`org.freedesktop.secrets`); previously every keyring call
+  failed with `org.freedesktop.DBus.Error.ServiceUnknown`.
+- **SFTP SSH-agent auth** now works in the Flatpak — granted `ssh-auth`, the
+  1Password and Bitwarden agent sockets, and read-only `~/.ssh` so `IdentityAgent`
+  in `ssh_config` resolves (previously fell back to the empty default agent and
+  failed with "Authentication failed"). Other custom agents: see the README for a
+  one-time `flatpak override`.
+
+### Changed
+
+- Flatpak runtime bumped `org.gnome.Platform` 47 → 49 (47 reached end-of-life).
+
 ## 0.1.0
 
 First release. Wonderblob is a cross-platform remote file browser — Cyberduck for
