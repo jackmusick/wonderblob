@@ -2,6 +2,25 @@
 
 All notable changes to Wonderblob are documented here. Versions are pre-1.0 (0.x).
 
+## 0.1.2
+
+OneDrive sign-in fix for Linux. On 0.1.1 the OAuth redirect opened a second app
+window, left the sheet stuck on "Signing in…", and the saved connection fell
+back to "Sign in again". Both symptoms had the same cause: the
+`wonderblob://auth` callback never reached the running app.
+
+### Fixed
+
+- **OneDrive sign-in now completes on Linux.** Two compounding causes, both
+  desktop-only:
+  - Added `tauri-plugin-single-instance` (with the `deep-link` feature). On
+    Linux/Windows the OS launches a *new* app instance for the
+    `wonderblob://auth` callback rather than delivering it in-process; the
+    plugin forwards the URL to the running instance and stops the second window.
+  - The packaged desktop file's `Exec` line was missing the `%u` field code, so
+    XDG dropped the redirect URL when launching the handler. The Flatpak now
+    appends `%u`, which its desktop export preserves.
+
 ## 0.1.1
 
 Linux Flatpak fixes. The 0.1.0 Flatpak ran sandboxed without the host access it
