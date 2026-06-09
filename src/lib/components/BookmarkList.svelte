@@ -14,9 +14,11 @@
   let {
     onnew,
     onedit,
+    onsettings,
   }: {
     onnew: () => void;
     onedit: (b: Bookmark) => void;
+    onsettings?: () => void;
   } = $props();
 
   let bookmarks = $state<Bookmark[]>([]);
@@ -208,9 +210,16 @@
 
 <div class="section-header">
   <span class="section-label">Connections</span>
-  <button class="icon-btn header-add" title="New connection" aria-label="New connection" onclick={onnew}>
-    <Icon name="plus" size={16} />
-  </button>
+  <span class="header-actions">
+    {#if onsettings}
+      <button class="icon-btn header-add" title="Settings" aria-label="Settings" onclick={onsettings}>
+        <Icon name="settings" size={16} />
+      </button>
+    {/if}
+    <button class="icon-btn header-add" title="New connection" aria-label="New connection" onclick={onnew}>
+      <Icon name="plus" size={16} />
+    </button>
+  </span>
 </div>
 
 <div
@@ -317,6 +326,11 @@
     color: var(--fg-secondary);
     text-transform: uppercase;
     letter-spacing: 0.04em;
+  }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
   }
   .list {
     outline: none;

@@ -13,6 +13,7 @@
   import FileList from "$lib/components/FileList.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import PreviewOverlay from "$lib/components/PreviewOverlay.svelte";
+  import Settings from "$lib/components/Settings.svelte";
   import TransfersPanel from "$lib/components/TransfersPanel.svelte";
   import { activeConnection, currentPath } from "$lib/stores/session";
   import { editConflicts, initEdit } from "$lib/stores/edit";
@@ -31,6 +32,7 @@
   let uploading = $state(false);
 
   let transfersOpen = $state(false);
+  let settingsOpen = $state(false);
 
   // Resizable sidebar (persisted; defaults wider than the old fixed 240px).
   let sidebarWidth = $state(280);
@@ -285,7 +287,12 @@
 
 <div class="shell">
   <aside class="sidebar" style="width:{sidebarWidth}px">
-    <BookmarkList bind:this={list} onnew={openNew} onedit={openEdit} />
+    <BookmarkList
+      bind:this={list}
+      onnew={openNew}
+      onedit={openEdit}
+      onsettings={() => (settingsOpen = true)}
+    />
   </aside>
   <div
     class="splitter"
@@ -397,6 +404,10 @@
 
 {#if sheetOpen}
   <ConnectionSheet bookmark={editing} onclose={closeSheet} onsaved={onSaved} />
+{/if}
+
+{#if settingsOpen}
+  <Settings onclose={() => (settingsOpen = false)} />
 {/if}
 
 {#if $editConflicts.length > 0}

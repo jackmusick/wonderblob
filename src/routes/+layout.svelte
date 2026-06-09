@@ -1,8 +1,14 @@
 <script lang="ts">
   import "../lib/styles/app.css";
   import { onMount } from "svelte";
+  import { applyTheme, prefs } from "$lib/stores/prefs";
 
   let { children } = $props();
+
+  // Keep the document's data-theme in sync with the theme preference.
+  $effect(() => {
+    applyTheme($prefs.theme);
+  });
 
   onMount(() => {
     const onContextMenu = (e: MouseEvent) => e.preventDefault();

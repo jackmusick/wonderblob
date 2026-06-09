@@ -29,8 +29,27 @@
   --radius: 6px;
 }
 
+/* Dark palette. Applied when the user FORCES dark (data-theme="dark"), or when
+   they follow the OS ("system" = no data-theme attribute) and the OS is dark.
+   A forced choice must beat the media query, so these are two rules; the values
+   are intentionally identical between them. The Settings page sets data-theme
+   via applyTheme() in stores/prefs.ts. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-app: #1e1e20;
+  --bg-sidebar: #252528;
+  --bg-content: #2a2a2d;
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-selected: rgba(94, 142, 245, 0.22);
+  --fg-primary: #ededf0;
+  --fg-secondary: #9b9ba1;
+  --border: rgba(255, 255, 255, 0.09);
+  --accent: #5e8ef5;
+  --danger: #e5736f;
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
     color-scheme: dark;
     --bg-app: #1e1e20;
     --bg-sidebar: #252528;
