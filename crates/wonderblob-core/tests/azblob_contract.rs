@@ -147,3 +147,47 @@ async fn azblob_empty_file_roundtrip() {
 
     backend.delete(path).await.expect("cleanup");
 }
+
+/// Overwriting a pre-existing APPEND blob (e.g. a Functions-style log) used to
+/// fail with 409 InvalidBlobType because `Put Block` is rejected on a non-block
+/// blob. The writer now deletes the append blob on that error and recreates it as
+/// a block blob, so save-back / overwrite succeeds and the new content wins.
+#[tokio::test]
+async fn azblob_overwrite_append_blob_recreates_as_block() {
+    if !enabled() {
+        eprintln!("skipped: set WONDERBLOB_TEST_AZBLOB=1 and run scripts/test-azblob-up.sh");
+        return;
+    }
+    let backend = AzBlobBackend::connect(test_config())
+        .await
+        .expect("connect");
+    backend
+        .ensure_test_container("wbtest")
+        .await
+        .expect("create container");
+
+    let path = "/wbtest/append-then-edit.json";
+    let _ = backend.delete(path).await;
+
+    // Seed a non-block blob, as some external tool (Azure Functions, logging) would.
+    backend
+        .put_append_blob_for_test(path, b"{\"original\":true}")
+        .await
+        .expect("seed append blob");
+
+    // Save-back over it with edited content via the normal write path.
+    let edited = b"{\"original\":false,\"edited\":\"by wonderblob\"}";
+    let mut w = backend.write(path).await.expect("open write");
+    w.write_all(edited).await.expect("write");
+    w.shutdown().await.expect("shutdown/commit must not 409");
+
+    let st = backend.stat(path).await.expect("stat");
+    assert_eq!(st.size, Some(edited.len() as u64), "size should match edit");
+
+    let mut r = backend.read(path, 0).await.expect("open read");
+    let mut got = Vec::new();
+    r.read_to_end(&mut got).await.expect("read back");
+    assert_eq!(got, edited, "edited content should have replaced the append blob");
+
+    backend.delete(path).await.expect("cleanup");
+}
