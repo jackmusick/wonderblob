@@ -35,6 +35,14 @@ notify = "8"
 base64 = "0.22"
 sha2 = "0.10"
 
+# Desktop-only. Required so the OneDrive OAuth callback `wonderblob://auth?code=…`
+# is forwarded to the already-running instance instead of spawning a second app
+# process: on Linux/Windows the deep-link plugin does NOT deliver in-process
+# without this. The `deep-link` feature makes single-instance hand the URL to the
+# deep-link plugin's `on_open_url` handler.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+
 [dev-dependencies]
 tempfile = "3"
 

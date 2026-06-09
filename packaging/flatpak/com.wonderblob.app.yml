@@ -62,7 +62,12 @@ modules:
       # Desktop file, renamed to the app-id with Icon= pointed at the app-id.
       - |
         src_desktop=$(ls deb-root/usr/share/applications/*.desktop | head -n1)
-        sed 's/^Icon=.*/Icon=com.wonderblob.app/' "$src_desktop" \
+        # Point Icon at the app-id AND append the `%u` field code to Exec: the
+        # Tauri bundler omits it, so without this the `wonderblob://auth` OAuth
+        # redirect URL is never passed to the handler (XDG drops the URL when
+        # Exec has no %u/%U). flatpak's desktop export preserves the field code.
+        sed -e 's/^Icon=.*/Icon=com.wonderblob.app/' \
+            -e '/^Exec=/ { /%[uUfF]/! s/$/ %u/ }' "$src_desktop" \
           > ${FLATPAK_ID}.desktop
         install -Dm644 ${FLATPAK_ID}.desktop \
           ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop

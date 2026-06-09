@@ -12,7 +12,21 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+    // MUST be the first plugin. On Linux/Windows the OS launches a fresh app
+    // instance for the `wonderblob://auth` OAuth callback; single-instance (with
+    // its `deep-link` feature) forwards that URL to the running instance's
+    // `on_open_url` handler and exits before a second window appears. Without it
+    // the OneDrive sign-in code is never delivered and the login silently fails.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {
+            // The `deep-link` feature forwards the callback URL to the deep-link
+            // plugin's `on_open_url` handler before this runs; nothing to do here.
+        }));
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
