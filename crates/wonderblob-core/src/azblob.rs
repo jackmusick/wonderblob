@@ -880,7 +880,10 @@ impl AzBlockWriter {
             let del = self.blob_client.clone();
             let retry = body.clone();
             self.state = WState::Staging(Box::pin(async move {
-                match blob.stage_block(&id, len, RequestContent::from(body), None).await {
+                match blob
+                    .stage_block(&id, len, RequestContent::from(body), None)
+                    .await
+                {
                     Ok(_) => Ok(()),
                     Err(e) if is_invalid_blob_type(&e) => {
                         del.delete(None).await.map_err(|e| map_az("delete", e))?;

@@ -162,7 +162,10 @@ mod tests {
     #[test]
     fn pre_host_directive_is_global() {
         let cfg = "IdentityAgent /global.sock\nHost specific\n  User x\n";
-        assert_eq!(identity_agent_for_host(cfg, "whatever"), Some("/global.sock".into()));
+        assert_eq!(
+            identity_agent_for_host(cfg, "whatever"),
+            Some("/global.sock".into())
+        );
     }
 
     #[test]
@@ -182,7 +185,10 @@ mod tests {
     fn negated_pattern_excludes_host() {
         let cfg = "Host * !secret\n  IdentityAgent /x.sock\n";
         assert_eq!(identity_agent_for_host(cfg, "secret"), None);
-        assert_eq!(identity_agent_for_host(cfg, "other"), Some("/x.sock".into()));
+        assert_eq!(
+            identity_agent_for_host(cfg, "other"),
+            Some("/x.sock".into())
+        );
     }
 
     #[test]

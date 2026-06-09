@@ -189,9 +189,7 @@ impl SftpBackend {
                 .map_err(|e| StorageError::Network {
                     detail: e.to_string(),
                 })?,
-            SftpAuth::Agent => {
-                authenticate_agent(&mut session, &cfg.username, &cfg.host).await?
-            }
+            SftpAuth::Agent => authenticate_agent(&mut session, &cfg.username, &cfg.host).await?,
             SftpAuth::KeyFile { path, passphrase } => {
                 authenticate_keyfile(&mut session, &cfg.username, path, passphrase.as_deref())
                     .await?
@@ -240,14 +238,16 @@ async fn authenticate_agent(
     use russh_keys::agent::client::AgentClient;
     let mut agent = match crate::ssh_agent::resolve_agent_socket(host) {
         // ssh_config's IdentityAgent wins over the environment, just like ssh.
-        Some(path) => AgentClient::connect_uds(&path).await.map_err(|e| {
-            StorageError::AuthFailed {
-                detail: format!(
-                    "cannot reach ssh-agent at {} (from ssh_config IdentityAgent): {e}",
-                    path.display()
-                ),
-            }
-        })?,
+        Some(path) => {
+            AgentClient::connect_uds(&path)
+                .await
+                .map_err(|e| StorageError::AuthFailed {
+                    detail: format!(
+                        "cannot reach ssh-agent at {} (from ssh_config IdentityAgent): {e}",
+                        path.display()
+                    ),
+                })?
+        }
         None => AgentClient::connect_env()
             .await
             .map_err(|e| StorageError::AuthFailed {

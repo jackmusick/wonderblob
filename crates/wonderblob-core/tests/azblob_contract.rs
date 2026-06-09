@@ -187,7 +187,10 @@ async fn azblob_overwrite_append_blob_recreates_as_block() {
     let mut r = backend.read(path, 0).await.expect("open read");
     let mut got = Vec::new();
     r.read_to_end(&mut got).await.expect("read back");
-    assert_eq!(got, edited, "edited content should have replaced the append blob");
+    assert_eq!(
+        got, edited,
+        "edited content should have replaced the append blob"
+    );
 
     backend.delete(path).await.expect("cleanup");
 }
